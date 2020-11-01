@@ -4,6 +4,8 @@ import asyncio
 import os
 import webbrowser
 
+from math import ceil
+
 # https://docs.python.org/3/library/typing.html
 from typing import Any, AsyncGenerator, Callable, Optional, TypedDict, TypeVar
 from urllib.parse import urljoin
@@ -118,9 +120,21 @@ async def saved_tracks():
     ) as spotify:
         await spotify.authorize_spotify()
 
+        r = await spotify.get(
+            "/v1/me/tracks", params={"limit": 1, "market": "from_token"}
+        )
+        paging_object = r.json()
+
+        # The total no. of tracks in the user's library
+        total_tracks = paging_object["total"]
+        # How many requests it will take to get all the tracks from the API
+        total_pages = ceil(total_tracks / PAGE_SIZE)
+
+        print(f"Fetching {total_tracks} tracks...")
+
         artist_ids: set[str] = set()
 
-        for page in range(10):
+        for page in range(total_pages):
             r = await spotify.get(
                 "/v1/me/tracks",
                 # https://developer.spotify.com/documentation/general/guides/track-relinking-guide/
