@@ -4,6 +4,7 @@ import asyncio
 import os
 import webbrowser
 
+from anyio import create_task_group, create_memory_object_stream
 from math import ceil
 
 # https://docs.python.org/3/library/typing.html
@@ -86,27 +87,31 @@ class SpotifySession(AsyncOAuth2Client):
         return r
 
 
-# https://mypy.readthedocs.io/en/stable/generics.html
-T = TypeVar("T")
-
-# TODO: Can we do this asynchronously?
 # https://realpython.com/async-io-python/#other-features-async-for-and-async-generators-comprehensions
-async def batcher(
-    fn: Callable[[set[str]], AsyncGenerator[T, None]],
-    ids: set[str],
-    *,
-    batch_size: int,
-) -> AsyncGenerator[T, None]:
-    while len(ids) > 0:
-        batch: set[str] = set()
+# TODO: Make ids into rx_id
+async def batcher(fn, ids: set[str], *, batch_size: int):
+    tx_item, rx_item = create_memory_object_stream()
 
-        while len(batch) < batch_size:
-            try:
-                batch.add(ids.pop())
-            except KeyError:
-                break
+    async with create_task_group() as tg:
+        async with tx_item:
+            while len(ids) > 0:
+                batch: list[str] = list()
 
-        async for item in fn(batch):
+                while len(batch) < batch_size:
+                    try:
+                        batch.append(ids.pop())
+                    except KeyError:
+                        break
+
+                # Each batch function will use tx_item and then close it
+                await tg.spawn(fn, batch, tx_item.clone())
+
+        # The original tx_item is closed here so rx_item doesn't block despite
+        # all the tx_item clones in the child tasks being closed
+
+        # tx_item.send() blocks until rx_item recieves it, so if this for loop was
+        # outside the task group, the task group would never finish - deadlock!
+        async for item in rx_item:
             yield item
 
 
@@ -156,13 +161,14 @@ async def saved_tracks():
                     artist_ids.add(artist["id"])
 
         # TODO: Handle errors from the Spotify API
-        async def request_artist_batch(batch: set):
+        async def request_artist_batch(batch, tx_artist):
             r = await spotify.get("/v1/artists", params={"ids": ",".join(batch)})
 
             json_response = r.json()
 
-            for artist in json_response["artists"]:
-                yield artist
+            async with tx_artist:
+                for artist in json_response["artists"]:
+                    await tx_artist.send(artist)
 
         print(f"Fetching {len(artist_ids)} artists...")
 

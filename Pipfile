@@ -13,6 +13,7 @@ authlib = "*"
 httpx = "==0.16.*"
 sqlalchemy = "*"
 python-dotenv = "*"
+anyio = "*"
 
 [requires]
 python_version = "3.9"
