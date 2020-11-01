@@ -120,6 +120,9 @@ venv.bak/
 # Rope project settings
 .ropeproject
 
+# Black
+.tmp
+
 # mkdocs documentation
 /site
 
