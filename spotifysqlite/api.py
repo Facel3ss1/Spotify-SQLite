@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import datetime
 import os
 import webbrowser
 
@@ -35,15 +34,17 @@ SHOW_DIALOG = False
 
 API_BASE_URL = "https://api.spotify.com"
 
+PAGE_SIZE = 50
+
 # https://www.python.org/dev/peps/pep-0589/
-class PagingObject(TypedDict):
-    href: str
-    items: list
-    limit: int
-    offset: int
-    next: Optional[str]
-    previous: Optional[str]
-    total: int
+# class PagingObject(TypedDict):
+#     href: str
+#     items: list
+#     limit: int
+#     offset: int
+#     next: Optional[str]
+#     previous: Optional[str]
+#     total: int
 
 
 # TODO: What if there are network problems?
@@ -62,7 +63,7 @@ class SpotifySession(AsyncOAuth2Client):
         )
 
         # print(f"Opening {authorization_url} in web browser...")
-        webbrowser.open(authorization_url)
+        webbrowser.open_new(authorization_url)
 
         authorization_response = input("Enter the full callback URL: ")
 
@@ -92,7 +93,7 @@ async def batcher(
     fn: Callable[[set[str]], AsyncGenerator[T, None]],
     ids: set[str],
     *,
-    batch_size: int = 50,
+    batch_size: int,
 ) -> AsyncGenerator[T, None]:
     while len(ids) > 0:
         batch: set[str] = set()
@@ -117,24 +118,22 @@ async def saved_tracks():
     ) as spotify:
         await spotify.authorize_spotify()
 
-        artist_ids = set()
+        artist_ids: set[str] = set()
 
-        # TODO: Use "next" on the paging object and a while loop
         for page in range(10):
-            PAGE_SIZE = 50
-
             r = await spotify.get(
                 "/v1/me/tracks",
                 # https://developer.spotify.com/documentation/general/guides/track-relinking-guide/
                 params={
                     "limit": PAGE_SIZE,
+                    # page will start at 0 and go up to total_pages - 1
                     "offset": page * PAGE_SIZE,
                     "market": "from_token",
                 },
             )
 
-            paging_object: PagingObject = r.json()
-            tracks = paging_object["items"]
+            paging_object = r.json()
+            tracks: list = paging_object["items"]
 
             for item in tracks:
                 track = item["track"]
@@ -151,14 +150,19 @@ async def saved_tracks():
             for artist in json_response["artists"]:
                 yield artist
 
+        print(f"Fetching {len(artist_ids)} artists...")
+
         artists_unsorted = [
             (a["name"], a["popularity"])
-            async for a in batcher(request_artist_batch, artist_ids)
+            async for a in batcher(
+                request_artist_batch, artist_ids, batch_size=PAGE_SIZE
+            )
         ]
 
         artists = sorted(artists_unsorted, key=lambda a: a[1], reverse=True)
 
-        for (name, popularity) in artists:
+        for i in range(100):
+            (name, popularity) = artists[i]
             print(f"{name} ({popularity})")
 
 
