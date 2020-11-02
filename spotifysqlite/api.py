@@ -113,7 +113,7 @@ async def batcher(
         async with tx_item:
             stream_ended = False
 
-            while not stream_ended:
+            while True:
                 batch = list()
 
                 while len(batch) < batch_size:
@@ -123,6 +123,9 @@ async def batcher(
                     except anyio.EndOfStream:
                         stream_ended = True
                         break
+
+                if stream_ended:
+                    break
 
                 # Each batch corountine will use tx_item and then close it
                 await tg.spawn(batch_coro, batch, tx_item.clone())
