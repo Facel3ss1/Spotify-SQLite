@@ -4,19 +4,18 @@ import asyncio
 import os
 import webbrowser
 from math import ceil
-
-# https://docs.python.org/3/library/typing.html
 from typing import Any, Callable, Coroutine, Optional, TypedDict
 from urllib.parse import urljoin
 
 import anyio
+import httpx
 from anyio import create_memory_object_stream, create_task_group
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from authlib.integrations.httpx_client import AsyncOAuth2Client
-
-# https://docs.python.org/3/library/asyncio.html
-# https://realpython.com/async-io-python/
-# https://www.python-httpx.org/
+from tenacity import RetryCallState, retry
+from tenacity.retry import retry_if_exception
+from tenacity.stop import stop_after_attempt
+from tenacity.wait import wait_random
 
 # TODO: Logging: https://docs.python.org/3/howto/logging.html
 
@@ -52,8 +51,15 @@ PAGE_SIZE = 50
 #     total: int
 
 
-# TODO: What if there are network problems?
-# TODO: https://findwork.dev/blog/advanced-usage-python-requests-timeouts-retries-hooks/
+def wait_retry_after(retry_state: RetryCallState) -> float:
+    http_status_error: httpx.HTTPStatusError = retry_state.outcome.exception()
+    r = http_status_error.response
+
+    retry_after = r.headers["Retry-After"]
+    # print(f"Retry-After: {retry_after}")
+    return float(retry_after)
+
+
 class SpotifySession(AsyncOAuth2Client):
     async def authorize_spotify(self):
         # TODO: Persist the previous token
@@ -78,8 +84,13 @@ class SpotifySession(AsyncOAuth2Client):
 
         # print(f"Token: {token}")
 
-    # TODO: https://tenacity.readthedocs.io/en/latest/index.html
-    # TODO: https://developer.spotify.com/documentation/web-api/#rate-limiting
+    # https://tenacity.readthedocs.io/en/latest/index.html
+    # https://developer.spotify.com/documentation/web-api/#rate-limiting
+    @retry(
+        retry=retry_if_exception(lambda e: e.response.status_code == 429),
+        stop=stop_after_attempt(5),
+        wait=wait_retry_after + wait_random(0, 2),
+    )
     async def get(self, url: str, **kwargs):
         # https://github.com/requests/toolbelt/blob/7c4f92bb81204d82ef01fb0f0ab6dba6c7afc075/requests_toolbelt/sessions.py
         r = await super().get(urljoin(API_BASE_URL, url), **kwargs)

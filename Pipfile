@@ -14,6 +14,7 @@ httpx = "==0.16.*"
 sqlalchemy = "*"
 python-dotenv = "*"
 anyio = "*"
+tenacity = "*"
 
 [requires]
 python_version = "3.9"
