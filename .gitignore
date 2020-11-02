@@ -121,7 +121,7 @@ venv.bak/
 .ropeproject
 
 # Black
-.tmp
+*.tmp
 
 # mkdocs documentation
 /site

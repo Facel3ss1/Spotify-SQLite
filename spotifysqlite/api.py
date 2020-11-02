@@ -78,7 +78,7 @@ class SpotifySession(AsyncOAuth2Client):
         # print(f"Token: {token}")
 
     # TODO: https://tenacity.readthedocs.io/en/latest/index.html
-    # https://developer.spotify.com/documentation/web-api/#rate-limiting
+    # TODO: https://developer.spotify.com/documentation/web-api/#rate-limiting
     async def get(self, url: str, **kwargs):
         # https://github.com/requests/toolbelt/blob/7c4f92bb81204d82ef01fb0f0ab6dba6c7afc075/requests_toolbelt/sessions.py
         r = await super().get(urljoin(API_BASE_URL, url), **kwargs)
@@ -133,6 +133,29 @@ async def output_artists(rx_artist_id: MemoryObjectReceiveStream, request_artist
         print(f"{name} ({popularity})")
 
 
+async def get_saved_tracks_page(
+    spotify: SpotifySession, page: int, tx_track: MemoryObjectSendStream
+):
+    r = await spotify.get(
+        "/v1/me/tracks",
+        # https://developer.spotify.com/documentation/general/guides/track-relinking-guide/
+        params={
+            "limit": PAGE_SIZE,
+            # page will start at 0 and go up to total_pages - 1
+            "offset": page * PAGE_SIZE,
+            "market": "from_token",
+        },
+    )
+
+    paging_object = r.json()
+    tracks: list = paging_object["items"]
+
+    async with tx_track:
+        for item in tracks:
+            track = item["track"]
+            await tx_track.send(track)
+
+
 async def main():
     client_id = os.getenv("CLIENT_ID")
     client_secret = os.getenv("CLIENT_SECRET")
@@ -157,24 +180,16 @@ async def main():
 
         artist_ids: set[str] = set()
 
-        for page in range(total_pages):
-            r = await spotify.get(
-                "/v1/me/tracks",
-                # https://developer.spotify.com/documentation/general/guides/track-relinking-guide/
-                params={
-                    "limit": PAGE_SIZE,
-                    # page will start at 0 and go up to total_pages - 1
-                    "offset": page * PAGE_SIZE,
-                    "market": "from_token",
-                },
-            )
+        tx_track, rx_track = create_memory_object_stream()
 
-            paging_object = r.json()
-            tracks: list = paging_object["items"]
+        async with create_task_group() as tg:
+            async with tx_track:
+                for page in range(total_pages):
+                    await tg.spawn(
+                        get_saved_tracks_page, spotify, page, tx_track.clone()
+                    )
 
-            for item in tracks:
-                track = item["track"]
-
+            async for track in rx_track:
                 for artist in track["artists"]:
                     artist_ids.add(artist["id"])
 
