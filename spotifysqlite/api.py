@@ -3,14 +3,15 @@ from __future__ import annotations
 import asyncio
 import os
 import webbrowser
-
-from anyio import create_task_group, create_memory_object_stream
 from math import ceil
 
 # https://docs.python.org/3/library/typing.html
 from typing import Any, AsyncGenerator, Callable, Optional, TypedDict, TypeVar
 from urllib.parse import urljoin
 
+import anyio
+from anyio import create_memory_object_stream, create_task_group
+from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 
 # https://docs.python.org/3/library/asyncio.html
@@ -88,34 +89,51 @@ class SpotifySession(AsyncOAuth2Client):
 
 
 # https://realpython.com/async-io-python/#other-features-async-for-and-async-generators-comprehensions
-# TODO: Make ids into rx_id
-async def batcher(fn, ids: set[str], *, batch_size: int):
-    tx_item, rx_item = create_memory_object_stream()
+async def batcher(batch_coro, rx_in: MemoryObjectReceiveStream, *, batch_size: int):
+    # TODO: a buffer_size parameter
+    tx_out, rx_out = create_memory_object_stream()
 
     async with create_task_group() as tg:
-        async with tx_item:
-            while len(ids) > 0:
-                batch: list[str] = list()
+        async with tx_out:
+            stream_ended = False
+
+            while not stream_ended:
+                batch = list()
 
                 while len(batch) < batch_size:
                     try:
-                        batch.append(ids.pop())
-                    except KeyError:
+                        item = await rx_in.receive()
+                        batch.append(item)
+                    except anyio.EndOfStream:
+                        stream_ended = True
                         break
 
-                # Each batch function will use tx_item and then close it
-                await tg.spawn(fn, batch, tx_item.clone())
+                # Each batch corountine will use tx_out and then close it
+                await tg.spawn(batch_coro, batch, tx_out.clone())
 
-        # The original tx_item is closed here so rx_item doesn't block despite
-        # all the tx_item clones in the child tasks being closed
+        # The original tx_out is closed here so rx_out doesn't unblock until
+        # all the tx_out clones in the child tasks are closed
 
-        # tx_item.send() blocks until rx_item recieves it, so if this for loop was
+        # tx_out.send() blocks until rx_out recieves from it, so if this for loop was
         # outside the task group, the task group would never finish - deadlock!
-        async for item in rx_item:
+        async for item in rx_out:
             yield item
 
 
-async def saved_tracks():
+async def output_artists(rx_artist_id: MemoryObjectReceiveStream, request_artist_batch):
+    artists_unsorted = [
+        (a["name"], a["popularity"])
+        async for a in batcher(request_artist_batch, rx_artist_id, batch_size=PAGE_SIZE)
+    ]
+
+    artists = sorted(artists_unsorted, key=lambda a: a[1], reverse=True)
+
+    for i in range(100):
+        (name, popularity) = artists[i]
+        print(f"{name} ({popularity})")
+
+
+async def main():
     client_id = os.getenv("CLIENT_ID")
     client_secret = os.getenv("CLIENT_SECRET")
     redirect_uri = os.getenv("REDIRECT_URI")
@@ -161,9 +179,8 @@ async def saved_tracks():
                     artist_ids.add(artist["id"])
 
         # TODO: Handle errors from the Spotify API
-        async def request_artist_batch(batch, tx_artist):
+        async def request_artist_batch(batch, tx_artist: MemoryObjectSendStream):
             r = await spotify.get("/v1/artists", params={"ids": ",".join(batch)})
-
             json_response = r.json()
 
             async with tx_artist:
@@ -172,18 +189,14 @@ async def saved_tracks():
 
         print(f"Fetching {len(artist_ids)} artists...")
 
-        artists_unsorted = [
-            (a["name"], a["popularity"])
-            async for a in batcher(
-                request_artist_batch, artist_ids, batch_size=PAGE_SIZE
-            )
-        ]
+        tx_artist_id, rx_artist_id = create_memory_object_stream()
 
-        artists = sorted(artists_unsorted, key=lambda a: a[1], reverse=True)
+        async with create_task_group() as tg:
+            await tg.spawn(output_artists, rx_artist_id, request_artist_batch)
 
-        for i in range(100):
-            (name, popularity) = artists[i]
-            print(f"{name} ({popularity})")
+            async with tx_artist_id:
+                for artist_id in artist_ids:
+                    await tx_artist_id.send(artist_id)
 
 
 if __name__ == "__main__":
@@ -201,7 +214,7 @@ if __name__ == "__main__":
 
     try:
         load_dotenv()
-        asyncio.run(saved_tracks())
+        asyncio.run(main())
         print("Finished!")
     except KeyboardInterrupt:
         print("Keyboard Interrupt!")
