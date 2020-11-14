@@ -102,7 +102,7 @@ class SpotifySession(AsyncOAuth2Client):
 
     # TODO: Handle errors from the Spotify API
     async def get_several_artists(
-        self, ids: list[str], tx_artist: MemoryObjectSendStream
+        self, tx_artist: MemoryObjectSendStream, ids: list[str]
     ):
         if len(ids) > 50:
             raise ValueError(
@@ -116,7 +116,7 @@ class SpotifySession(AsyncOAuth2Client):
             for artist in json_response["artists"]:
                 await tx_artist.send(artist)
 
-    async def get_saved_tracks(self, page: int, tx_saved_track: MemoryObjectSendStream):
+    async def get_saved_tracks(self, tx_saved_track: MemoryObjectSendStream, page: int):
         r = await self.get(
             "/v1/me/tracks",
             # https://developer.spotify.com/documentation/general/guides/track-relinking-guide/
@@ -138,8 +138,8 @@ class SpotifySession(AsyncOAuth2Client):
 # TODO: Instead of this being an async generator, we could send the items back using a stream
 # https://realpython.com/async-io-python/#other-features-async-for-and-async-generators-comprehensions
 async def batcher(
-    batch_coro: Callable[[list, MemoryObjectSendStream], Coroutine],
     rx_in: MemoryObjectReceiveStream,
+    batch_coro: Callable[[MemoryObjectSendStream, list], Coroutine],
     *,
     batch_size: int,
 ):
@@ -174,7 +174,7 @@ async def batcher(
                     break
 
                 # Each batch corountine will use tx_item and then close it
-                await tg.spawn(batch_coro, batch, tx_item.clone())
+                await tg.spawn(batch_coro, tx_item.clone(), batch)
 
         # The original tx_item is closed here so rx_item doesn't unblock until
         # all the tx_item clones in the child tasks are closed
@@ -217,7 +217,7 @@ async def main():
             async with tx_saved_track:
                 for page in range(total_pages):
                     await tg.spawn(
-                        spotify.get_saved_tracks, page, tx_saved_track.clone()
+                        spotify.get_saved_tracks, tx_saved_track.clone(), page
                     )
 
             async for saved_track in rx_saved_track:
@@ -228,7 +228,7 @@ async def main():
         print(f"Fetching {len(artist_ids)} artists...")
 
         async def send_artist_ids(
-            artist_ids: set[str], tx_artist_id: MemoryObjectSendStream
+            tx_artist_id: MemoryObjectSendStream, artist_ids: set[str]
         ):
             async with tx_artist_id:
                 for artist_id in artist_ids:
@@ -238,13 +238,13 @@ async def main():
 
         async with create_task_group() as tg:
             async with tx_artist_id:
-                await tg.spawn(send_artist_ids, artist_ids, tx_artist_id.clone())
+                await tg.spawn(send_artist_ids, tx_artist_id.clone(), artist_ids)
 
             artists_unsorted = [
                 (a["name"], a["popularity"])
                 async for a in batcher(
-                    lambda b, tx: spotify.get_several_artists(b, tx),
                     rx_artist_id,
+                    lambda tx, b: spotify.get_several_artists(tx, b),
                     batch_size=PAGE_SIZE,
                 )
             ]
