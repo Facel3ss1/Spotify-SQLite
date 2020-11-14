@@ -167,9 +167,8 @@ async def get_several_artists(
             await tx_artist.send(artist)
 
 
-# TODO: This returns tracks not saved_tracks
 async def get_saved_tracks(
-    spotify: SpotifySession, page: int, tx_track: MemoryObjectSendStream
+    spotify: SpotifySession, page: int, tx_saved_track: MemoryObjectSendStream
 ):
     r = await spotify.get(
         "/v1/me/tracks",
@@ -182,12 +181,11 @@ async def get_saved_tracks(
     )
 
     paging_object = r.json()
-    tracks: list = paging_object["items"]
+    saved_tracks: list = paging_object["items"]
 
-    async with tx_track:
-        for item in tracks:
-            track = item["track"]
-            await tx_track.send(track)
+    async with tx_saved_track:
+        for saved_track in saved_tracks:
+            await tx_saved_track.send(saved_track)
 
 
 async def main():
@@ -216,14 +214,17 @@ async def main():
         # a set to make sure we aren't requesting the same artist twice.
         artist_ids: set[str] = set()
 
-        tx_track, rx_track = create_memory_object_stream()
+        tx_saved_track, rx_saved_track = create_memory_object_stream()
 
         async with create_task_group() as tg:
-            async with tx_track:
+            async with tx_saved_track:
                 for page in range(total_pages):
-                    await tg.spawn(get_saved_tracks, spotify, page, tx_track.clone())
+                    await tg.spawn(
+                        get_saved_tracks, spotify, page, tx_saved_track.clone()
+                    )
 
-            async for track in rx_track:
+            async for saved_track in rx_saved_track:
+                track = saved_track["track"]
                 for artist in track["artists"]:
                     artist_ids.add(artist["id"])
 
