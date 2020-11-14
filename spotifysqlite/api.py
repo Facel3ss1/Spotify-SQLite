@@ -51,7 +51,7 @@ PAGE_SIZE = 50
 #     total: int
 
 
-def wait_retry_after(retry_state: RetryCallState) -> float:
+def _wait_retry_after(retry_state: RetryCallState) -> float:
     http_status_error: httpx.HTTPStatusError = retry_state.outcome.exception()
     r = http_status_error.response
 
@@ -90,7 +90,7 @@ class SpotifySession(AsyncOAuth2Client):
     @retry(
         retry=retry_if_exception(lambda e: e.response.status_code == 429),
         stop=stop_after_attempt(5),
-        wait=wait_retry_after + wait_random(0, 2),
+        wait=_wait_retry_after + wait_random(0, 2),
     )
     async def get(self, url: str, **kwargs):
         # https://github.com/requests/toolbelt/blob/7c4f92bb81204d82ef01fb0f0ab6dba6c7afc075/requests_toolbelt/sessions.py
