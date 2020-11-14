@@ -73,6 +73,7 @@ class SpotifySession(AsyncOAuth2Client):
             show_dialog="true" if SHOW_DIALOG else "false",
         )
 
+        # TODO: This is really annoying please make it stop HTTP server pls
         # print(f"Opening {authorization_url} in web browser...")
         webbrowser.open_new(authorization_url)
 
@@ -98,6 +99,40 @@ class SpotifySession(AsyncOAuth2Client):
         r.raise_for_status()
 
         return r
+
+    # TODO: Handle errors from the Spotify API
+    async def get_several_artists(
+        self, ids: list[str], tx_artist: MemoryObjectSendStream
+    ):
+        if len(ids) > 50:
+            raise ValueError(
+                f"The Get Several Artists endpoint only accepts a maximum of 50 IDs! (attempted {len(ids)} IDs)"
+            )
+
+        r = await self.get("/v1/artists", params={"ids": ",".join(ids)})
+        json_response = r.json()
+
+        async with tx_artist:
+            for artist in json_response["artists"]:
+                await tx_artist.send(artist)
+
+    async def get_saved_tracks(self, page: int, tx_saved_track: MemoryObjectSendStream):
+        r = await self.get(
+            "/v1/me/tracks",
+            # https://developer.spotify.com/documentation/general/guides/track-relinking-guide/
+            params={
+                "limit": PAGE_SIZE,
+                "offset": page * PAGE_SIZE,
+                "market": "from_token",
+            },
+        )
+
+        paging_object = r.json()
+        saved_tracks: list = paging_object["items"]
+
+        async with tx_saved_track:
+            for saved_track in saved_tracks:
+                await tx_saved_track.send(saved_track)
 
 
 # TODO: Instead of this being an async generator, we could send the items back using a stream
@@ -150,44 +185,6 @@ async def batcher(
             yield item
 
 
-# TODO: Handle errors from the Spotify API
-async def get_several_artists(
-    spotify: SpotifySession, ids: list[str], tx_artist: MemoryObjectSendStream
-):
-    if len(ids) > 50:
-        raise ValueError(
-            f"The Get Several Artists endpoint only accepts a maximum of 50 IDs! (attempted {len(ids)} IDs)"
-        )
-
-    r = await spotify.get("/v1/artists", params={"ids": ",".join(ids)})
-    json_response = r.json()
-
-    async with tx_artist:
-        for artist in json_response["artists"]:
-            await tx_artist.send(artist)
-
-
-async def get_saved_tracks(
-    spotify: SpotifySession, page: int, tx_saved_track: MemoryObjectSendStream
-):
-    r = await spotify.get(
-        "/v1/me/tracks",
-        # https://developer.spotify.com/documentation/general/guides/track-relinking-guide/
-        params={
-            "limit": PAGE_SIZE,
-            "offset": page * PAGE_SIZE,
-            "market": "from_token",
-        },
-    )
-
-    paging_object = r.json()
-    saved_tracks: list = paging_object["items"]
-
-    async with tx_saved_track:
-        for saved_track in saved_tracks:
-            await tx_saved_track.send(saved_track)
-
-
 async def main():
     client_id = os.getenv("CLIENT_ID")
     client_secret = os.getenv("CLIENT_SECRET")
@@ -220,7 +217,7 @@ async def main():
             async with tx_saved_track:
                 for page in range(total_pages):
                     await tg.spawn(
-                        get_saved_tracks, spotify, page, tx_saved_track.clone()
+                        spotify.get_saved_tracks, page, tx_saved_track.clone()
                     )
 
             async for saved_track in rx_saved_track:
@@ -246,7 +243,7 @@ async def main():
             artists_unsorted = [
                 (a["name"], a["popularity"])
                 async for a in batcher(
-                    lambda b, tx: get_several_artists(spotify, b, tx),
+                    lambda b, tx: spotify.get_several_artists(b, tx),
                     rx_artist_id,
                     batch_size=PAGE_SIZE,
                 )
