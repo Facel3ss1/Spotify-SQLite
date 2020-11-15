@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import webbrowser
 from math import ceil
@@ -16,8 +17,6 @@ from tenacity import RetryCallState, retry
 from tenacity.retry import retry_if_exception
 from tenacity.stop import stop_after_attempt
 from tenacity.wait import wait_random
-
-# TODO: Logging: https://docs.python.org/3/howto/logging.html
 
 # https://developer.spotify.com/documentation/general/guides/authorization-guide/#authorization-code-flow
 AUTHORIZATION_BASE_URL = "https://accounts.spotify.com/authorize"
@@ -50,13 +49,17 @@ PAGE_SIZE = 50
 #     previous: Optional[str]
 #     total: int
 
+logger = logging.getLogger(__name__)
+
 
 def _wait_retry_after(retry_state: RetryCallState) -> float:
     http_status_error: httpx.HTTPStatusError = retry_state.outcome.exception()
-    r = http_status_error.response
+    r: httpx.Response = http_status_error.response
 
     retry_after = r.headers["Retry-After"]
-    # print(f"Retry-After: {retry_after}")
+
+    logger.debug(f"Request to {r.url} returned 429. Retry-After: {retry_after}")
+
     return float(retry_after)
 
 
@@ -74,7 +77,7 @@ class SpotifySession(AsyncOAuth2Client):
         )
 
         # TODO: This is really annoying please make it stop HTTP server pls
-        # print(f"Opening {authorization_url} in web browser...")
+        logger.info(f"Opening {authorization_url} in web browser...")
         webbrowser.open_new(authorization_url)
 
         authorization_response = input("Enter the full callback URL: ")
@@ -205,7 +208,7 @@ async def main():
         # How many requests it will take to get all the tracks from the API
         total_pages = ceil(total_tracks / PAGE_SIZE)
 
-        print(f"Fetching {total_tracks} tracks...")
+        logger.info(f"Fetching {total_tracks} tracks...")
 
         # TODO: When we eventually replace this with a stream, we'll still need to use
         # a set to make sure we aren't requesting the same artist twice.
@@ -225,7 +228,7 @@ async def main():
                 for artist in track["artists"]:
                     artist_ids.add(artist["id"])
 
-        print(f"Fetching {len(artist_ids)} artists...")
+        logger.info(f"Fetching {len(artist_ids)} artists...")
 
         async def send_artist_ids(
             tx_artist_id: MemoryObjectSendStream, artist_ids: set[str]
@@ -269,9 +272,18 @@ if __name__ == "__main__":
 
     from dotenv import load_dotenv
 
+    # https://docs.python.org/3/howto/logging.html
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(levelname)s [%(asctime)s] %(name)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
     try:
         load_dotenv()
         asyncio.run(main())
-        print("Finished!")
+        logger.info("Finished!")
     except KeyboardInterrupt:
-        print("Keyboard Interrupt!")
+        logger.exception("Keyboard Interrupt!")
