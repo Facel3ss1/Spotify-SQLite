@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import webbrowser
+from functools import partial
 from math import ceil
 from typing import Any, Callable, Coroutine, Optional, TypedDict
 from urllib.parse import urljoin
@@ -17,27 +18,6 @@ from tenacity import RetryCallState, retry
 from tenacity.retry import retry_if_exception
 from tenacity.stop import stop_after_attempt
 from tenacity.wait import wait_random
-
-# https://developer.spotify.com/documentation/general/guides/authorization-guide/#authorization-code-flow
-AUTHORIZATION_BASE_URL = "https://accounts.spotify.com/authorize"
-TOKEN_URL = "https://accounts.spotify.com/api/token"
-
-# https://developer.spotify.com/documentation/general/guides/scopes/
-SCOPE = [
-    "user-library-read",
-    "user-follow-read",
-    # "user-top-read",
-    # "user-read-recently-played",
-    # "playlist-read-private",
-    # "playlist-read-collaborative",
-]
-
-SHOW_DIALOG = False
-
-API_BASE_URL = "https://api.spotify.com"
-
-# The 'Get Saved Tracks' endpoint returns pages with a max size of 50 tracks
-PAGE_SIZE = 50
 
 # https://www.python.org/dev/peps/pep-0589/
 # class PagingObject(TypedDict):
@@ -64,16 +44,22 @@ def _wait_retry_after(retry_state: RetryCallState) -> float:
 
 
 class SpotifySession(AsyncOAuth2Client):
-    async def authorize_spotify(self):
+    # https://developer.spotify.com/documentation/general/guides/authorization-guide/#authorization-code-flow
+    AUTHORIZATION_BASE_URL = "https://accounts.spotify.com/authorize"
+    TOKEN_URL = "https://accounts.spotify.com/api/token"
+
+    API_BASE_URL = "https://api.spotify.com"
+
+    async def authorize_spotify(self, show_dialog: bool = False):
         # TODO: Persist the previous token
         # Authorize with the Spotify API using OAuth2
         # https://docs.authlib.org/en/stable/client/oauth2.html
 
         # We have to use super() because we override .get() below
         authorization_url, state = super().create_authorization_url(
-            AUTHORIZATION_BASE_URL,
+            self.AUTHORIZATION_BASE_URL,
             # Spotify specific parameter that always shows the web UI for authorizing regardless of prior authorization.
-            show_dialog="true" if SHOW_DIALOG else "false",
+            show_dialog="true" if show_dialog else "false",
         )
 
         # TODO: This is really annoying please make it stop HTTP server pls
@@ -83,7 +69,7 @@ class SpotifySession(AsyncOAuth2Client):
         authorization_response = input("Enter the full callback URL: ")
 
         token = await super().fetch_token(
-            TOKEN_URL, authorization_response=authorization_response
+            self.TOKEN_URL, authorization_response=authorization_response
         )
 
         # print(f"Token: {token}")
@@ -97,19 +83,35 @@ class SpotifySession(AsyncOAuth2Client):
     )
     async def get(self, url: str, **kwargs):
         # https://github.com/requests/toolbelt/blob/7c4f92bb81204d82ef01fb0f0ab6dba6c7afc075/requests_toolbelt/sessions.py
-        r = await super().get(urljoin(API_BASE_URL, url), **kwargs)
+        r = await super().get(urljoin(self.API_BASE_URL, url), **kwargs)
 
         r.raise_for_status()
 
         return r
 
     # TODO: Handle errors from the Spotify API
-    async def get_several_artists(
-        self, tx_artist: MemoryObjectSendStream, ids: list[str]
+
+    async def get_multiple_albums(
+        self, tx_album: MemoryObjectSendStream, *, ids: list[str]
     ):
-        if len(ids) > 50:
+        if len(ids) > 50 or len(ids) < 1:
             raise ValueError(
-                f"The Get Several Artists endpoint only accepts a maximum of 50 IDs! (attempted {len(ids)} IDs)"
+                f"The Get Multiple Albums endpoint only accepts between 1 and 50 IDs! (attempted {len(ids)} IDs)"
+            )
+
+        r = await self.get("/v1/albums", params={"ids": ",".join(ids)})
+        json_response = r.json()
+
+        async with tx_album:
+            for album in json_response["albums"]:
+                await tx_album.send(album)
+
+    async def get_multiple_artists(
+        self, tx_artist: MemoryObjectSendStream, *, ids: list[str]
+    ):
+        if len(ids) > 50 or len(ids) < 1:
+            raise ValueError(
+                f"The Get Multiple Artists endpoint only accepts between 1 and 50 IDs! (attempted {len(ids)} IDs)"
             )
 
         r = await self.get("/v1/artists", params={"ids": ",".join(ids)})
@@ -119,13 +121,91 @@ class SpotifySession(AsyncOAuth2Client):
             for artist in json_response["artists"]:
                 await tx_artist.send(artist)
 
-    async def get_saved_tracks(self, tx_saved_track: MemoryObjectSendStream, page: int):
+    async def get_multiple_audio_features(
+        self, tx_audio_features: MemoryObjectSendStream, *, ids: list[str]
+    ):
+        if len(ids) > 100 or len(ids) < 1:
+            raise ValueError(
+                f"The Get Multiple Audio Features endpoint only accepts between 1 and 100 IDs! (attempted {len(ids)} IDs)"
+            )
+
+        r = await self.get("/v1/audio-features", params={"ids": ",".join(ids)})
+
+        json_response = r.json()
+        audio_features_list: list = json_response["audio_features"]
+
+        async with tx_audio_features:
+            for audio_features in audio_features_list:
+                tx_audio_features.send(audio_features)
+
+    async def get_followed_artists(
+        self, tx_artist: MemoryObjectSendStream, *, limit: int, after: str
+    ):
+        if limit > 50 or limit < 1:
+            raise ValueError(
+                f"The Get Followed Artists endpoint only accepts a limit between 1 and 50! (attempted limit={limit})"
+            )
+
+        r = await self.get(
+            "/v1/me/following",
+            params={"type": "artist", "after": after, "limit": limit},
+        )
+
+        cursor_paging_object = r.json()
+        followed_artists: list = cursor_paging_object["artists"]["items"]
+
+        async with tx_artist:
+            for artist in followed_artists:
+                await tx_artist.send(artist)
+
+    async def get_saved_albums(
+        self, tx_saved_album: MemoryObjectSendStream, *, limit: int, offset: int
+    ):
+        if limit > 50 or limit < 1:
+            raise ValueError(
+                f"The Get Saved Albums endpoint only accepts a limit between 1 and 50! (attempted limit={limit})"
+            )
+
+        if offset < 0:
+            raise ValueError(
+                f"The Get Saved Albums endpoint only accepts a positive offset! (attempted offset={offset})"
+            )
+
+        r = await self.get(
+            "/v1/me/albums",
+            params={
+                "limit": limit,
+                "offset": offset,
+                "market": "from_token",
+            },
+        )
+
+        paging_object = r.json()
+        saved_albums: list = paging_object["items"]
+
+        async with tx_saved_album:
+            for saved_album in saved_albums:
+                await tx_saved_album.send(saved_album)
+
+    async def get_saved_tracks(
+        self, tx_saved_track: MemoryObjectSendStream, *, limit: int, offset: int
+    ):
+        if limit > 50 or limit < 1:
+            raise ValueError(
+                f"The Get Saved Tracks endpoint only accepts a limit between 1 and 50! (attempted limit={limit})"
+            )
+
+        if offset < 0:
+            raise ValueError(
+                f"The Get Saved Tracks endpoint only accepts a positive offset! (attempted offset={offset})"
+            )
+
         r = await self.get(
             "/v1/me/tracks",
             # https://developer.spotify.com/documentation/general/guides/track-relinking-guide/
             params={
-                "limit": PAGE_SIZE,
-                "offset": page * PAGE_SIZE,
+                "limit": limit,
+                "offset": offset,
                 "market": "from_token",
             },
         )
@@ -189,12 +269,22 @@ async def batcher(
 
 
 async def main():
-    client_id = os.getenv("CLIENT_ID")
-    client_secret = os.getenv("CLIENT_SECRET")
-    redirect_uri = os.getenv("REDIRECT_URI")
+    # https://developer.spotify.com/documentation/general/guides/scopes/
+    SCOPE = [
+        "user-library-read",
+        "user-follow-read",
+        # "user-top-read",
+        # "user-read-recently-played",
+        # "playlist-read-private",
+        # "playlist-read-collaborative",
+    ]
+
+    CLIENT_ID = os.getenv("CLIENT_ID")
+    CLIENT_SECRET = os.getenv("CLIENT_SECRET")
+    REDIRECT_URI = os.getenv("REDIRECT_URI")
 
     async with SpotifySession(
-        client_id, client_secret, scope=SCOPE, redirect_uri=redirect_uri
+        CLIENT_ID, CLIENT_SECRET, scope=SCOPE, redirect_uri=REDIRECT_URI
     ) as spotify:
         await spotify.authorize_spotify()
 
@@ -202,6 +292,9 @@ async def main():
             "/v1/me/tracks", params={"limit": 1, "market": "from_token"}
         )
         paging_object = r.json()
+
+        # The 'Get Saved Tracks' endpoint returns pages with a max size of 50 tracks
+        PAGE_SIZE = 50
 
         # The total no. of tracks in the user's library
         total_tracks = paging_object["total"]
@@ -220,7 +313,12 @@ async def main():
             async with tx_saved_track:
                 for page in range(total_pages):
                     await tg.spawn(
-                        spotify.get_saved_tracks, tx_saved_track.clone(), page
+                        partial(
+                            spotify.get_saved_tracks,
+                            tx_saved_track.clone(),
+                            limit=PAGE_SIZE,
+                            offset=page * PAGE_SIZE,
+                        )
                     )
 
             async for saved_track in rx_saved_track:
@@ -247,7 +345,7 @@ async def main():
                 (a["name"], a["popularity"])
                 async for a in batcher(
                     rx_artist_id,
-                    lambda tx, b: spotify.get_several_artists(tx, b),
+                    lambda tx, b: spotify.get_multiple_artists(tx, ids=b),
                     batch_size=PAGE_SIZE,
                 )
             ]
