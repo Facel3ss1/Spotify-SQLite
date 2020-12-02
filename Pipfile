@@ -15,6 +15,7 @@ sqlalchemy = "*"
 python-dotenv = "*"
 anyio = "*"
 tenacity = "*"
+python-dateutil = "*"
 
 [requires]
 python_version = "3.9"

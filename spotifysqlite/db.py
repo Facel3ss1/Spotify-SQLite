@@ -104,11 +104,14 @@ class SpotifyResource:
     def id(cls):
         """
         The ID refers to the Spotify ID (https://developer.spotify.com/documentation/web-api/#spotify-uris-and-ids) of that resource.
-        
+
         They are in base62 (0-9a-zA-Z) and 22 chars long (https://stackoverflow.com/questions/37980664/spotify-track-id-features).
         """
         if has_inherited_table(cls):
-            return Column(ForeignKey(f"{cls.resource_name()}.id"), primary_key=True,)
+            return Column(
+                ForeignKey(f"{cls.resource_name()}.id"),
+                primary_key=True,
+            )
         else:
             return Column(
                 String(22),
@@ -167,7 +170,7 @@ def auto_delete_orphans(*attr_keys):
     Class decorator that will register orphan listeners on the attributes in
     ``attr_keys``.
 
-    The orphan listeners will automatically delete orphaned objects from the attributes 
+    The orphan listeners will automatically delete orphaned objects from the attributes
     when an instance of the class is deleted.
 
     This is meant for many-to-many relationships, which can't have cascade rules.
@@ -222,8 +225,16 @@ def auto_delete_orphans(*attr_keys):
 album_artist = Table(
     "album_artist",
     Base.metadata,
-    Column("album_id", ForeignKey("album.id"), primary_key=True,),
-    Column("artist_id", ForeignKey("artist.id"), primary_key=True,),
+    Column(
+        "album_id",
+        ForeignKey("album.id"),
+        primary_key=True,
+    ),
+    Column(
+        "artist_id",
+        ForeignKey("artist.id"),
+        primary_key=True,
+    ),
 )
 
 
@@ -232,10 +243,12 @@ album_artist = Table(
 # because artist_order is an additional column
 class TrackArtist(Base):
     track_id: str = Column(
-        ForeignKey("track.id"), primary_key=True,
+        ForeignKey("track.id"),
+        primary_key=True,
     )
     artist_id: str = Column(
-        ForeignKey("artist.id"), primary_key=True,
+        ForeignKey("artist.id"),
+        primary_key=True,
     )
     # We use an ordering_list to put the artists on a track in the correct order
     artist_order: int = Column(Integer, nullable=False)
@@ -268,9 +281,9 @@ class Genre(Base):
         else:
             with session.no_autoflush:
                 # Try to fetch the genre from the DB
-                unique_genre: Genre = session.query(cls).filter(
-                    cls.name == name
-                ).one_or_none()
+                unique_genre: Genre = (
+                    session.query(cls).filter(cls.name == name).one_or_none()
+                )
 
                 if unique_genre is None:
                     # If it isn't in the DB, we return a new Genre to be cached
@@ -286,11 +299,11 @@ class Genre(Base):
 
 # https://github.com/sqlalchemy/sqlalchemy/wiki/UniqueObjectValidatedOnPending
 # See also https://docs.sqlalchemy.org/en/13/orm/extensions/declarative/mixins.html#mixing-in-association-proxy-and-other-attributes
-@auto_delete_orphans("_genres")
+# @auto_delete_orphans("_genres")
 class HasGenres:
     """
     Define a class that can have many genres.
-    
+
     This defines a many-to-many relationship to the Genre class including an association
     proxy. The genres are checked to make sure they are unique within a session.
     """
@@ -303,8 +316,16 @@ class HasGenres:
         secondary_table = Table(
             f"{tablename}_genre",
             Base.metadata,
-            Column(f"{tablename}_id", ForeignKey(f"{tablename}.id"), primary_key=True,),
-            Column("genre_id", ForeignKey("genre.id"), primary_key=True,),
+            Column(
+                f"{tablename}_id",
+                ForeignKey(f"{tablename}.id"),
+                primary_key=True,
+            ),
+            Column(
+                "genre_id",
+                ForeignKey("genre.id"),
+                primary_key=True,
+            ),
         )
 
         return relationship(
@@ -425,7 +446,10 @@ class Track(SpotifyResource, Base):
     )
     # https://docs.sqlalchemy.org/en/13/orm/basic_relationships.html#one-to-one
     audio_features: "AudioFeatures" = relationship(
-        "AudioFeatures", uselist=False, backref="track", cascade="all, delete-orphan",
+        "AudioFeatures",
+        uselist=False,
+        backref="track",
+        cascade="all, delete-orphan",
     )
 
     # Adding a Artist() to artists will create a new TrackArtist() with its artist_id set
@@ -513,7 +537,9 @@ class SavedAlbum(Album):
 
 class SavedTrack(Track):
     added_at: datetime.datetime = Column(
-        DateTime, nullable=False, default=datetime.datetime.now
+        DateTime,
+        nullable=False,
+        # default=datetime.datetime.now
     )
 
     # TODO: Generalise this into SpotifyResource?
@@ -521,7 +547,7 @@ class SavedTrack(Track):
     # See also https://github.com/zzzeek/test_sqlalchemy/issues/648
     @classmethod
     def from_track(cls, track: Track, added_at: datetime.datetime):
-        # TODO: Use object_session to delete track
+        # TODO: Use object_session to delete original track
 
         saved_track = cls(
             id=track.id,
