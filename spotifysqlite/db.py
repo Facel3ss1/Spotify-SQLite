@@ -548,6 +548,7 @@ class SavedTrack(Track):
     @classmethod
     def from_track(cls, track: Track, added_at: datetime.datetime):
         # TODO: Use object_session to delete original track
+        # Or use session.merge with SpotifyResources
 
         saved_track = cls(
             id=track.id,
@@ -605,6 +606,9 @@ def create_engine(db_file: str, **kwargs) -> Engine:
         dbapi_connection.create_function(
             "regexp", 2, lambda x, y: 1 if re.search(x, y) else 0
         )
+
+        # TODO: Foreign keys aren't enforced by default, but we're not ready yet
+        # dbapi_connection.execute("PRAGMA foreign_keys = ON;")
 
     engine = sqlalchemy.create_engine(f"sqlite:///{db_file}", **kwargs)
     Base.metadata.create_all(engine)

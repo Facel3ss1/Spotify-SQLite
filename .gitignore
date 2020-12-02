@@ -144,3 +144,4 @@ cython_debug/
 
 # Test databases
 *.db
+*.db-journal
