@@ -15,9 +15,9 @@ from sqlalchemy import (
     Date,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Integer,
-    Numeric,
     String,
     Table,
     Text,
@@ -466,43 +466,47 @@ class AudioFeatures(Base):
     track_id: str = Column(ForeignKey("track.id"), primary_key=True)
     # https://docs.microsoft.com/en-us/sql/t-sql/data-types/precision-scale-and-length-transact-sql?view=sql-server-ver15
     acousticness: float = Column(
-        Numeric(precision=4, scale=3, asdecimal=False),
+        Float,
         CheckConstraint("acousticness BETWEEN 0 AND 1"),
         nullable=False,
     )
     danceability: float = Column(
-        Numeric(precision=4, scale=3, asdecimal=False),
+        Float,
         CheckConstraint("danceability BETWEEN 0 AND 1"),
         nullable=False,
     )
     energy: float = Column(
-        Numeric(precision=4, scale=3, asdecimal=False),
+        Float,
         CheckConstraint("energy BETWEEN 0 AND 1"),
         nullable=False,
     )
     instrumentalness: float = Column(
-        Numeric(precision=4, scale=3, asdecimal=False),
+        Float,
         CheckConstraint("instrumentalness BETWEEN 0 AND 1"),
         nullable=False,
     )
     liveness: float = Column(
-        Numeric(precision=4, scale=3, asdecimal=False),
+        Float,
         CheckConstraint("liveness BETWEEN 0 AND 1"),
         nullable=False,
     )
     speechiness: float = Column(
-        Numeric(precision=4, scale=3, asdecimal=False),
+        Float,
         CheckConstraint("speechiness BETWEEN 0 AND 1"),
         nullable=False,
     )
     valence: float = Column(
-        Numeric(precision=4, scale=3, asdecimal=False),
+        Float,
         CheckConstraint("valence BETWEEN 0 AND 1"),
         nullable=False,
     )
-    loudness: float = Column(Numeric(asdecimal=False), nullable=False)
+    loudness: float = Column(Float, nullable=False)
     # https://en.wikipedia.org/wiki/Pitch_class
-    key: int = Column(Integer, CheckConstraint("key BETWEEN 0 AND 11"), nullable=False)
+    key: int = Column(
+        Integer,
+        CheckConstraint("key BETWEEN 0 AND 11"),
+        nullable=False,
+    )
 
     class Mode(enum.Enum):
         MINOR = 0
@@ -510,10 +514,14 @@ class AudioFeatures(Base):
 
     mode: Mode = Column(Enum(Mode), nullable=False)
     tempo: float = Column(
-        Numeric(asdecimal=False), CheckConstraint("tempo > 0"), nullable=False
+        Float,
+        CheckConstraint("tempo >= 0"),
+        nullable=False,
     )
     time_signature: int = Column(
-        Integer, CheckConstraint("time_signature > 0"), nullable=False
+        Integer,
+        CheckConstraint("time_signature >= 0"),
+        nullable=False,
     )
 
 
@@ -607,8 +615,8 @@ def create_engine(db_file: str, **kwargs) -> Engine:
             "regexp", 2, lambda x, y: 1 if re.search(x, y) else 0
         )
 
-        # TODO: Foreign keys aren't enforced by default, but we're not ready yet
-        # dbapi_connection.execute("PRAGMA foreign_keys = ON;")
+        # TODO: Foreign keys won't be enforced, we're not ready yet
+        dbapi_connection.execute("PRAGMA foreign_keys = OFF;")
 
     engine = sqlalchemy.create_engine(f"sqlite:///{db_file}", **kwargs)
     Base.metadata.create_all(engine)

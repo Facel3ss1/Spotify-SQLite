@@ -36,11 +36,14 @@ def _wait_retry_after(retry_state: RetryCallState) -> float:
     http_status_error: httpx.HTTPStatusError = retry_state.outcome.exception()
     r: httpx.Response = http_status_error.response
 
-    retry_after = r.headers["Retry-After"]
+    if r.status_code == 429:
+        retry_after = r.headers["Retry-After"]
 
-    logger.debug(f"Request to {r.url} returned 429. Retry-After: {retry_after}")
+        logger.debug(f"Request to {r.url} returned 429. Retry-After: {retry_after}")
 
-    return float(retry_after)
+        return float(retry_after)
+    else:
+        return 0
 
 
 class SpotifySession(AsyncOAuth2Client):
@@ -63,7 +66,7 @@ class SpotifySession(AsyncOAuth2Client):
         )
 
         # TODO: This is really annoying please make it stop HTTP server pls
-        logger.info(f"Opening {authorization_url} in web browser...")
+        print(f"Opening {authorization_url} in web browser...")
         webbrowser.open_new(authorization_url)
 
         authorization_response = input("Enter the full callback URL: ")
@@ -77,7 +80,9 @@ class SpotifySession(AsyncOAuth2Client):
     # https://tenacity.readthedocs.io/en/latest/index.html
     # https://developer.spotify.com/documentation/web-api/#rate-limiting
     @retry(
-        retry=retry_if_exception(lambda e: e.response.status_code == 429),
+        retry=retry_if_exception(
+            lambda e: e.response.status_code == 429 or e.response.status_code == 503
+        ),
         stop=stop_after_attempt(5),
         wait=_wait_retry_after + wait_random(0, 2),
     )
@@ -136,7 +141,7 @@ class SpotifySession(AsyncOAuth2Client):
 
         async with tx_audio_features:
             for audio_features in audio_features_list:
-                tx_audio_features.send(audio_features)
+                await tx_audio_features.send(audio_features)
 
     async def get_followed_artists(
         self, tx_artist: MemoryObjectSendStream, *, limit: int, after: str

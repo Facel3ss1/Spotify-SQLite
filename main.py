@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import datetime
 from functools import partial
 from math import ceil
 
@@ -16,7 +15,7 @@ from progress.bar import Bar
 from sqlalchemy.orm import Session
 
 import spotifysqlite.db as db
-from spotifysqlite.api import SpotifySession
+from spotifysqlite.api import SpotifySession, batcher
 
 logger = logging.getLogger("spotifysqlite")
 logger.setLevel(logging.DEBUG)
@@ -43,16 +42,33 @@ def saved_track_from_json(saved_track_json):
     return db.SavedTrack.from_track(track, added_at)
 
 
+def audio_features_from_json(audio_features_json):
+    return db.AudioFeatures(
+        acousticness=audio_features_json["acousticness"],
+        danceability=audio_features_json["danceability"],
+        energy=audio_features_json["energy"],
+        instrumentalness=audio_features_json["instrumentalness"],
+        liveness=audio_features_json["liveness"],
+        speechiness=audio_features_json["speechiness"],
+        valence=audio_features_json["valence"],
+        loudness=audio_features_json["loudness"],
+        key=audio_features_json["key"],
+        mode=db.AudioFeatures.Mode(audio_features_json["mode"]),
+        tempo=audio_features_json["tempo"],
+        time_signature=audio_features_json["time_signature"],
+    )
+
+
 async def main():
     """
     `main` will authorise the user with Spotify and then fetch every track from their
     library. For each track in their library it will add these records to the database:
     - The `SavedTrack`
-    - The track's `Genre`s
     - The track's `Artist`s
         - Including the `Artist`'s `Genre`s
     - The track's `Album`
         - This includes the `Artist`s (and their respective `Genre`s) for that `Album`
+        - The `Album` also has `Genre`s
     - The `AudioFeatures` for that track
 
     `main` does this and ensures that there will be no duplicate records in the database.
@@ -91,14 +107,14 @@ async def main():
         # How many requests it will take to get all the tracks from the API
         total_pages = ceil(total_tracks / PAGE_SIZE)
 
-        # logger.info(f"Fetching {total_tracks} tracks...")
-        tracks_bar = Bar("Fetching tracks...", max=total_tracks)
+        logger.info(f"Fetching {total_tracks} Tracks...")
+        tracks_bar = Bar("Fetching Tracks...", max=total_tracks)
 
         # These all map IDs to the json response for that ID
         saved_tracks: dict[str, dict] = dict()
         albums: dict[str, dict] = dict()
         artists: dict[str, dict] = dict()
-        audio_features: dict[str, dict] = dict()
+        audio_features_dict: dict[str, dict] = dict()
 
         pending_albums: set[str] = set()
         pending_artists: set[str] = set()
@@ -138,28 +154,71 @@ async def main():
         tracks_bar.finish()
 
         # 2. Fetch all the pending albums from step 1 and mark any new artists as pending
-        # logger.info(f"Fetching {len(pending_albums)} albums...")
+        # logger.info(f"Fetching {len(pending_albums)} Albums...")
 
         # 3. Fetch all the pending artists from step 1 and 2
-        # logger.info(f"Fetching {len(pending_artists)} artists...")
+        # logger.info(f"Fetching {len(pending_artists)} Artists...")
 
         # We can also fetch all the audio features in parallel with steps 2 and 3
+
+        logger.info("Fetching Audio Features...")
+        audio_features_bar = Bar("Fetching Audio Features...", max=len(saved_tracks))
+
+        async def send_track_ids(
+            tx_track_id: MemoryObjectSendStream, saved_tracks: dict[str, dict]
+        ):
+            async with tx_track_id:
+                for track_id in saved_tracks.keys():
+                    await tx_track_id.send(track_id)
+                    audio_features_bar.next()
+
+        tx_track_id, rx_track_id = create_memory_object_stream()
+
+        async with create_task_group() as tg:
+            async with tx_track_id:
+                await tg.spawn(send_track_ids, tx_track_id.clone(), saved_tracks)
+
+            async for audio_features in batcher(
+                rx_track_id,
+                lambda tx, b: spotify.get_multiple_audio_features(tx, ids=b),
+                batch_size=100,
+            ):
+                track_id = audio_features["id"]
+                audio_features_dict[track_id] = audio_features
+
+        audio_features_bar.finish()
 
         # 4. Loop through the saved tracks and create the DB objects, merging into the DB
         # TODO: We could be clever and create unique objects but its easier just to merge for the MVP
 
-        # logger.info("Committing to database...")
+        logger.info("Setting up Database...")
+        print("Setting up Database...")
 
-        if os.path.exists("test.db"):
-            os.remove("test.db")
+        filename = "test.db"
 
-        engine = db.create_engine("test.db")
+        while os.path.exists(filename):
+            try:
+                os.remove(filename)
+                break
+            except PermissionError:
+                input(
+                    f"{filename} is open in another program! Close it and press enter... "
+                )
+                continue
+
+        engine = db.create_engine(filename)
         session = Session(engine)
 
-        db_bar = Bar("Committing to database...", max=total_tracks)
+        logger.info("Saving to Database...")
+        db_bar = Bar("Saving to Database...", max=len(saved_tracks))
 
         for saved_track_json in saved_tracks.values():
             saved_track = saved_track_from_json(saved_track_json)
+
+            if saved_track.id in audio_features_dict:
+                audio_features_json = audio_features_dict[saved_track.id]
+                audio_features = audio_features_from_json(audio_features_json)
+                saved_track.audio_features = audio_features
 
             # TODO: https://docs.sqlalchemy.org/en/13/orm/session_state_management.html#merging
             session.add(saved_track)
@@ -183,10 +242,12 @@ if __name__ == "__main__":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     # https://docs.python.org/3/howto/logging.html
-    logging.basicConfig(
-        format="%(levelname)s [%(asctime)s] %(name)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    # logging.basicConfig(
+    #     filename="debug.log",
+    #     level=logging.DEBUG,
+    #     format="%(levelname)s [%(asctime)s] %(name)s - %(message)s",
+    #     datefmt="%Y-%m-%d %H:%M:%S",
+    # )
 
     # logging.getLogger("sqlalchemy.engine").setLevel(logging.INFO)
 
@@ -194,5 +255,7 @@ if __name__ == "__main__":
         load_dotenv()
         asyncio.run(main())
         logger.info("Finished!")
-    except KeyboardInterrupt:
-        logger.exception("Keyboard Interrupt!")
+    except Exception as e:
+        logger.exception("Exception occurred:")
+        if e is not KeyboardInterrupt:
+            raise e
