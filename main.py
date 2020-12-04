@@ -108,7 +108,7 @@ async def main():
         total_pages = ceil(total_tracks / PAGE_SIZE)
 
         logger.info(f"Fetching {total_tracks} Tracks...")
-        tracks_bar = Bar("Fetching Tracks...", max=total_tracks)
+        bar = Bar("Fetching Tracks...", max=total_tracks)
 
         # These all map IDs to the json response for that ID
         saved_tracks: dict[str, dict] = dict()
@@ -149,9 +149,9 @@ async def main():
                     artist_id = artist["id"]
                     pending_artists.add(artist_id)
 
-                tracks_bar.next()
+                bar.next()
 
-        tracks_bar.finish()
+        bar.finish()
 
         # 2. Fetch all the pending albums from step 1 and mark any new artists as pending
         # logger.info(f"Fetching {len(pending_albums)} Albums...")
@@ -162,7 +162,7 @@ async def main():
         # We can also fetch all the audio features in parallel with steps 2 and 3
 
         logger.info("Fetching Audio Features...")
-        audio_features_bar = Bar("Fetching Audio Features...", max=len(saved_tracks))
+        bar = Bar("Fetching Audio Features...", max=len(saved_tracks))
 
         tx_track_id, rx_track_id = create_memory_object_stream()
         tx_audio_features, rx_audio_features = create_memory_object_stream()
@@ -186,9 +186,9 @@ async def main():
             async for audio_features in rx_audio_features:
                 track_id = audio_features["id"]
                 audio_features_dict[track_id] = audio_features
-                audio_features_bar.next()
+                bar.next()
 
-        audio_features_bar.finish()
+        bar.finish()
 
         # 4. Loop through the saved tracks and create the DB objects, merging into the DB
         # TODO: We could be clever and create unique objects but its easier just to merge for the MVP
@@ -212,7 +212,7 @@ async def main():
         session = Session(engine)
 
         logger.info("Saving to Database...")
-        db_bar = Bar("Saving to Database...", max=len(saved_tracks))
+        bar = Bar("Saving to Database...", max=len(saved_tracks))
 
         for saved_track_json in saved_tracks.values():
             saved_track = saved_track_from_json(saved_track_json)
@@ -225,11 +225,11 @@ async def main():
             # TODO: https://docs.sqlalchemy.org/en/13/orm/session_state_management.html#merging
             session.add(saved_track)
 
-            db_bar.next()
+            bar.next()
 
         session.commit()
 
-        db_bar.finish()
+        bar.finish()
 
 
 if __name__ == "__main__":
