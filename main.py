@@ -164,27 +164,29 @@ async def main():
         logger.info("Fetching Audio Features...")
         audio_features_bar = Bar("Fetching Audio Features...", max=len(saved_tracks))
 
-        async def send_track_ids(
-            tx_track_id: MemoryObjectSendStream, saved_tracks: dict[str, dict]
-        ):
-            async with tx_track_id:
-                for track_id in saved_tracks.keys():
-                    await tx_track_id.send(track_id)
-                    audio_features_bar.next()
-
         tx_track_id, rx_track_id = create_memory_object_stream()
+        tx_audio_features, rx_audio_features = create_memory_object_stream()
 
         async with create_task_group() as tg:
-            async with tx_track_id:
-                await tg.spawn(send_track_ids, tx_track_id.clone(), saved_tracks)
+            async with tx_audio_features:
+                await tg.spawn(
+                    partial(
+                        batcher,
+                        rx_track_id,
+                        tx_audio_features.clone(),
+                        lambda tx, b: spotify.get_multiple_audio_features(tx, ids=b),
+                        batch_size=100,
+                    )
+                )
 
-            async for audio_features in batcher(
-                rx_track_id,
-                lambda tx, b: spotify.get_multiple_audio_features(tx, ids=b),
-                batch_size=100,
-            ):
+                async with tx_track_id:
+                    for track_id in saved_tracks.keys():
+                        await tx_track_id.send(track_id)
+
+            async for audio_features in rx_audio_features:
                 track_id = audio_features["id"]
                 audio_features_dict[track_id] = audio_features
+                audio_features_bar.next()
 
         audio_features_bar.finish()
 

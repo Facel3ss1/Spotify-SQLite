@@ -223,22 +223,23 @@ class SpotifySession(AsyncOAuth2Client):
                 await tx_saved_track.send(saved_track)
 
 
-# TODO: Instead of this being an async generator, we could send the items back using a stream
 # https://realpython.com/async-io-python/#other-features-async-for-and-async-generators-comprehensions
 async def batcher(
     rx_in: MemoryObjectReceiveStream,
+    tx_out: MemoryObjectSendStream,
     batch_coro: Callable[[MemoryObjectSendStream, list], Coroutine],
     *,
     batch_size: int,
 ):
     """
     Takes an input stream, `rx_in`, and splits it up into batches of size `batch_size`,
-    then the batches are processed using `batch_coro` and the processed items are yielded.
+    then the batches are processed using `batch_coro` and the processed items are sent
+    using the `tx_out` stream.
 
     For each batch, `batch_coro` is spawned, and it takes the batch and a send stream as
     arguments. `batch_coro` is expected to process the batch, and then send back the
     processed items induvidually using the send stream. These processed items are then
-    recieved by the batcher and finally yielded to the caller.
+    recieved by the batcher and finally sent back to the caller.
     """
     # TODO: a buffer_size parameter
     tx_item, rx_item = create_memory_object_stream()
@@ -258,19 +259,21 @@ async def batcher(
                         stream_ended = True
                         break
 
+                if len(batch) > 0:
+                    # Each batch corountine will use tx_item and then close it
+                    await tg.spawn(batch_coro, tx_item.clone(), batch)
+
                 if stream_ended:
                     break
-
-                # Each batch corountine will use tx_item and then close it
-                await tg.spawn(batch_coro, tx_item.clone(), batch)
 
         # The original tx_item is closed here so rx_item doesn't unblock until
         # all the tx_item clones in the child tasks are closed
 
         # tx_item.send() blocks until rx_item recieves from it, so if this for loop was
         # outside the task group, the task group would never finish - deadlock!
-        async for item in rx_item:
-            yield item
+        async with tx_out:
+            async for item in rx_item:
+                await tx_out.send(item)
 
 
 async def main():
@@ -333,28 +336,26 @@ async def main():
 
         logger.info(f"Fetching {len(artist_ids)} artists...")
 
-        async def send_artist_ids(
-            tx_artist_id: MemoryObjectSendStream, artist_ids: set[str]
-        ):
-            async with tx_artist_id:
-                for artist_id in artist_ids:
-                    await tx_artist_id.send(artist_id)
-
         tx_artist_id, rx_artist_id = create_memory_object_stream()
+        tx_artist, rx_artist = create_memory_object_stream()
 
         async with create_task_group() as tg:
-            async with tx_artist_id:
-                await tg.spawn(send_artist_ids, tx_artist_id.clone(), artist_ids)
-
-            artists_unsorted = [
-                (a["name"], a["popularity"])
-                async for a in batcher(
-                    rx_artist_id,
-                    lambda tx, b: spotify.get_multiple_artists(tx, ids=b),
-                    batch_size=PAGE_SIZE,
+            async with tx_artist:
+                await tg.spawn(
+                    partial(
+                        batcher,
+                        rx_artist_id,
+                        tx_artist.clone(),
+                        lambda tx, b: spotify.get_multiple_artists(tx, ids=b),
+                        batch_size=PAGE_SIZE,
+                    )
                 )
-            ]
 
+                async with tx_artist_id:
+                    for artist_id in artist_ids:
+                        await tx_artist_id.send(artist_id)
+
+            artists_unsorted = [(a["name"], a["popularity"]) async for a in rx_artist]
             artists = sorted(artists_unsorted, key=lambda a: a[1], reverse=True)
 
             for i in range(100):
