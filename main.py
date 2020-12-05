@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import date
 from functools import partial
 from math import ceil
 
@@ -27,7 +28,6 @@ def track_from_json(track_json):
         name=track_json["name"],
         explicit=track_json["explicit"],
         duration_ms=track_json["duration_ms"],
-        album_id=track_json["album"]["id"],
         disc_number=track_json["disc_number"],
         track_number=track_json["track_number"],
         popularity=track_json["popularity"],
@@ -57,6 +57,34 @@ def audio_features_from_json(audio_features_json):
         tempo=audio_features_json["tempo"],
         time_signature=audio_features_json["time_signature"],
     )
+
+
+def album_from_json(album_json):
+    release_date_str = album_json["release_date"]
+    release_date_precision = db.Album.ReleaseDatePrecision(
+        album_json["release_date_precision"]
+    )
+
+    # If the precision isn't to the day, make sure the string is in a YYYY-MM-DD format
+    if release_date_precision is db.Album.ReleaseDatePrecision.MONTH:
+        # It doesn't matter what we add, so just add 01s
+        release_date_str += "-01"
+    elif release_date_precision is db.Album.ReleaseDatePrecision.YEAR:
+        release_date_str += "-01-01"
+
+    album = db.Album(
+        id=album_json["id"],
+        name=album_json["name"],
+        album_type=db.Album.Type(album_json["album_type"]),
+        release_date=date.fromisoformat(release_date_str),
+        release_date_precision=release_date_precision,
+        label=album_json["label"],
+        popularity=album_json["popularity"],
+    )
+
+    album.genres = album_json["genres"]
+
+    return album
 
 
 async def main():
@@ -111,10 +139,10 @@ async def main():
         bar = Bar("Fetching Tracks...", max=total_tracks)
 
         # These all map IDs to the json response for that ID
-        saved_tracks: dict[str, dict] = dict()
-        albums: dict[str, dict] = dict()
-        artists: dict[str, dict] = dict()
-        audio_features_dict: dict[str, dict] = dict()
+        saved_tracks_jsons: dict[str, dict] = dict()
+        albums_jsons: dict[str, dict] = dict()
+        artists_jsons: dict[str, dict] = dict()
+        audio_features_jsons: dict[str, dict] = dict()
 
         pending_albums: set[str] = set()
         pending_artists: set[str] = set()
@@ -139,7 +167,7 @@ async def main():
 
                 # Add the json response to saved_tracks
                 track_id = track["id"]
-                saved_tracks[track_id] = saved_track_json
+                saved_tracks_jsons[track_id] = saved_track_json
 
                 # Mark the albums and artists as pending
                 album_id = track["album"]["id"]
@@ -154,15 +182,52 @@ async def main():
         bar.finish()
 
         # 2. Fetch all the pending albums from step 1 and mark any new artists as pending
-        # logger.info(f"Fetching {len(pending_albums)} Albums...")
+        logger.info(f"Fetching {len(pending_albums)} Albums...")
+        bar = Bar("Fetching Albums...", max=len(pending_albums))
+
+        tx_album_id, rx_album_id = create_memory_object_stream()
+        tx_album, rx_album = create_memory_object_stream()
+
+        async with create_task_group() as tg:
+            async with tx_album:
+                # Spawn a batcher which will request the artists in batches of 20
+                await tg.spawn(
+                    partial(
+                        batcher,
+                        rx_album_id,
+                        tx_album.clone(),
+                        lambda tx, b: spotify.get_multiple_albums(tx, ids=b),
+                        batch_size=20,
+                    )
+                )
+
+                async with tx_album_id:
+                    while len(pending_albums) > 0:
+                        album_id = pending_albums.pop()
+                        await tx_album_id.send(album_id)
+
+            async for album in rx_album:
+                # Add the json response to albums
+                album_id = album["id"]
+                albums_jsons[album_id] = album
+
+                # Mark the album's artists as pending if they aren't already
+                for artist in album["artists"]:
+                    artist_id = artist["id"]
+
+                    if artist_id not in pending_artists:
+                        pending_artists.add(artist_id)
+
+                bar.next()
+
+        bar.finish()
 
         # 3. Fetch all the pending artists from step 1 and 2
         # logger.info(f"Fetching {len(pending_artists)} Artists...")
 
-        # We can also fetch all the audio features in parallel with steps 2 and 3
-
+        # 4. Fetch the Audio Features for each track
         logger.info("Fetching Audio Features...")
-        bar = Bar("Fetching Audio Features...", max=len(saved_tracks))
+        bar = Bar("Fetching Audio Features...", max=len(saved_tracks_jsons))
 
         tx_track_id, rx_track_id = create_memory_object_stream()
         tx_audio_features, rx_audio_features = create_memory_object_stream()
@@ -180,19 +245,17 @@ async def main():
                 )
 
                 async with tx_track_id:
-                    for track_id in saved_tracks.keys():
+                    for track_id in saved_tracks_jsons.keys():
                         await tx_track_id.send(track_id)
 
             async for audio_features in rx_audio_features:
                 track_id = audio_features["id"]
-                audio_features_dict[track_id] = audio_features
+                audio_features_jsons[track_id] = audio_features
                 bar.next()
 
         bar.finish()
 
-        # 4. Loop through the saved tracks and create the DB objects, merging into the DB
-        # TODO: We could be clever and create unique objects but its easier just to merge for the MVP
-
+        # 5. Loop through the JSON to create and add the DB objects
         logger.info("Setting up Database...")
         print("Setting up Database...")
 
@@ -211,25 +274,40 @@ async def main():
         engine = db.create_engine(filename)
         session = Session(engine)
 
-        logger.info("Saving to Database...")
-        bar = Bar("Saving to Database...", max=len(saved_tracks))
+        logger.info("Adding to Database...")
+        bar = Bar("Adding to Database...", max=len(saved_tracks_jsons))
 
-        for saved_track_json in saved_tracks.values():
+        # This maps the IDs to the database objects
+        albums: dict[str, db.Album] = dict()
+
+        for album_json in albums_jsons.values():
+            album = album_from_json(album_json)
+            albums[album.id] = album
+
+        for saved_track_json in saved_tracks_jsons.values():
             saved_track = saved_track_from_json(saved_track_json)
 
-            if saved_track.id in audio_features_dict:
-                audio_features_json = audio_features_dict[saved_track.id]
+            # Add the audio features
+            if saved_track.id in audio_features_jsons:
+                audio_features_json = audio_features_jsons[saved_track.id]
                 audio_features = audio_features_from_json(audio_features_json)
                 saved_track.audio_features = audio_features
 
-            # TODO: https://docs.sqlalchemy.org/en/13/orm/session_state_management.html#merging
+            track_json = saved_track_json["track"]
+
+            # Add the album
+            album_id = track_json["album"]["id"]
+            album = albums[album_id]
+            saved_track.album = album
+
             session.add(saved_track)
 
             bar.next()
 
-        session.commit()
-
         bar.finish()
+
+        print("Saving Database...")
+        session.commit()
 
 
 if __name__ == "__main__":
@@ -257,6 +335,7 @@ if __name__ == "__main__":
         load_dotenv()
         asyncio.run(main())
         logger.info("Finished!")
+        print("Finished!")
     except Exception as e:
         logger.exception("Exception occurred:")
         if e is not KeyboardInterrupt:

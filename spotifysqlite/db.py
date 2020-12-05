@@ -382,7 +382,7 @@ class Album(SpotifyResource, HasGenres, Base):
         SINGLE = "single"
         COMPILATION = "compilation"
 
-    album_type: Type = Column(Enum(Type), nullable=False, default=Type.ALBUM)
+    album_type: Type = Column(Enum(Type), nullable=False)
     # Spotify doesnt always add the day or month to the release date:
     # https://developer.spotify.com/documentation/web-api/reference-beta/#object-albumobject
     # So we have to store the month and day as 01 or something if release_date_precision isn't DAY
@@ -639,6 +639,7 @@ if __name__ == "__main__":
     a_night_at_the_opera = Album(
         id="1GbtB4zTqAsyfZEsm1RZfx",
         name="A Night at the Opera",
+        album_type=Album.Type.ALBUM,
         release_date=datetime.date.fromisoformat("1975-01-01"),
         release_date_precision=Album.ReleaseDatePrecision.YEAR,
         label="Queen Productions Ltd",
