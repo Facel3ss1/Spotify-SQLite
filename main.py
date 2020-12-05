@@ -87,6 +87,19 @@ def album_from_json(album_json):
     return album
 
 
+def artist_from_json(artist_json):
+    artist = db.Artist(
+        id=artist_json["id"],
+        name=artist_json["name"],
+        followers=artist_json["followers"]["total"],
+        popularity=artist_json["popularity"],
+    )
+
+    artist.genres = artist_json["genres"]
+
+    return artist
+
+
 async def main():
     """
     `main` will authorise the user with Spotify and then fetch every track from their
@@ -139,9 +152,9 @@ async def main():
         bar = Bar("Fetching Tracks...", max=total_tracks)
 
         # These all map IDs to the json response for that ID
-        saved_tracks_jsons: dict[str, dict] = dict()
-        albums_jsons: dict[str, dict] = dict()
-        artists_jsons: dict[str, dict] = dict()
+        saved_track_jsons: dict[str, dict] = dict()
+        album_jsons: dict[str, dict] = dict()
+        artist_jsons: dict[str, dict] = dict()
         audio_features_jsons: dict[str, dict] = dict()
 
         pending_albums: set[str] = set()
@@ -165,9 +178,9 @@ async def main():
             async for saved_track_json in rx_saved_track:
                 track = saved_track_json["track"]
 
-                # Add the json response to saved_tracks
+                # Add the json response to saved_track_jsons
                 track_id = track["id"]
-                saved_tracks_jsons[track_id] = saved_track_json
+                saved_track_jsons[track_id] = saved_track_json
 
                 # Mark the albums and artists as pending
                 album_id = track["album"]["id"]
@@ -190,7 +203,7 @@ async def main():
 
         async with create_task_group() as tg:
             async with tx_album:
-                # Spawn a batcher which will request the artists in batches of 20
+                # Spawn a batcher which will request the albums in batches of 20
                 await tg.spawn(
                     partial(
                         batcher,
@@ -207,9 +220,9 @@ async def main():
                         await tx_album_id.send(album_id)
 
             async for album in rx_album:
-                # Add the json response to albums
+                # Add the json response to album_jsons
                 album_id = album["id"]
-                albums_jsons[album_id] = album
+                album_jsons[album_id] = album
 
                 # Mark the album's artists as pending if they aren't already
                 for artist in album["artists"]:
@@ -223,11 +236,41 @@ async def main():
         bar.finish()
 
         # 3. Fetch all the pending artists from step 1 and 2
-        # logger.info(f"Fetching {len(pending_artists)} Artists...")
+        logger.info(f"Fetching {len(pending_artists)} Artists...")
+        bar = Bar("Fetching Artists...", max=len(pending_artists))
+
+        tx_artist_id, rx_artist_id = create_memory_object_stream()
+        tx_artist, rx_artist = create_memory_object_stream()
+
+        async with create_task_group() as tg:
+            async with tx_artist:
+                await tg.spawn(
+                    partial(
+                        batcher,
+                        rx_artist_id,
+                        tx_artist.clone(),
+                        lambda tx, b: spotify.get_multiple_artists(tx, ids=b),
+                        batch_size=50,
+                    )
+                )
+
+                async with tx_artist_id:
+                    while len(pending_artists) > 0:
+                        artist_id = pending_artists.pop()
+                        await tx_artist_id.send(artist_id)
+
+            async for artist in rx_artist:
+                # Add the json response to artist_jsons
+                artist_id = artist["id"]
+                artist_jsons[artist_id] = artist
+
+                bar.next()
+
+        bar.finish()
 
         # 4. Fetch the Audio Features for each track
         logger.info("Fetching Audio Features...")
-        bar = Bar("Fetching Audio Features...", max=len(saved_tracks_jsons))
+        bar = Bar("Fetching Audio Features...", max=len(saved_track_jsons))
 
         tx_track_id, rx_track_id = create_memory_object_stream()
         tx_audio_features, rx_audio_features = create_memory_object_stream()
@@ -245,7 +288,7 @@ async def main():
                 )
 
                 async with tx_track_id:
-                    for track_id in saved_tracks_jsons.keys():
+                    for track_id in saved_track_jsons.keys():
                         await tx_track_id.send(track_id)
 
             async for audio_features in rx_audio_features:
@@ -255,7 +298,7 @@ async def main():
 
         bar.finish()
 
-        # 5. Loop through the JSON to create and add the DB objects
+        # 5. Loop through the JSON responses to create and add the DB objects
         logger.info("Setting up Database...")
         print("Setting up Database...")
 
@@ -275,16 +318,27 @@ async def main():
         session = Session(engine)
 
         logger.info("Adding to Database...")
-        bar = Bar("Adding to Database...", max=len(saved_tracks_jsons))
+        bar = Bar("Adding to Database...", max=len(saved_track_jsons))
 
         # This maps the IDs to the database objects
+        artists: dict[str, db.Artist] = dict()
         albums: dict[str, db.Album] = dict()
 
-        for album_json in albums_jsons.values():
+        for artist_json in artist_jsons.values():
+            artist = artist_from_json(artist_json)
+            artists[artist.id] = artist
+
+        for album_json in album_jsons.values():
             album = album_from_json(album_json)
+
+            # Add the artists for the album
+            for artist_id in map(lambda a: a["id"], album_json["artists"]):
+                artist = artists[artist_id]
+                album.artists.append(artist)
+
             albums[album.id] = album
 
-        for saved_track_json in saved_tracks_jsons.values():
+        for saved_track_json in saved_track_jsons.values():
             saved_track = saved_track_from_json(saved_track_json)
 
             # Add the audio features
@@ -299,6 +353,11 @@ async def main():
             album_id = track_json["album"]["id"]
             album = albums[album_id]
             saved_track.album = album
+
+            # Add the artists for the track
+            for artist_id in map(lambda a: a["id"], track_json["artists"]):
+                artist = artists[artist_id]
+                saved_track.artists.append(artist)
 
             session.add(saved_track)
 
