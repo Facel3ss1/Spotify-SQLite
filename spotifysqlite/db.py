@@ -8,6 +8,7 @@ import re
 import sqlite3
 
 import sqlalchemy
+from dateutil.parser import isoparse
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
@@ -23,7 +24,6 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     event,
-    inspect,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.associationproxy import association_proxy
@@ -34,12 +34,7 @@ from sqlalchemy.ext.declarative import (
 )
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.ext.orderinglist import ordering_list
-from sqlalchemy.orm import (
-    Session,
-    object_session,
-    relationship,
-    validates,
-)
+from sqlalchemy.orm import Session, object_session, relationship, validates
 from sqlalchemy.orm.attributes import get_history
 
 # https://docs.sqlalchemy.org/en/13/orm/tutorial.html#
@@ -378,6 +373,19 @@ class Artist(SpotifyResource, HasGenres, Base):
     # TODO: Is this useful?
     tracks = association_proxy("track_artists", "track")
 
+    @classmethod
+    def from_json(cls, artist_json):
+        artist = cls(
+            id=artist_json["id"],
+            name=artist_json["name"],
+            followers=artist_json["followers"]["total"],
+            popularity=artist_json["popularity"],
+        )
+
+        artist.genres = artist_json["genres"]
+
+        return artist
+
 
 class Album(SpotifyResource, HasGenres, Base):
     # We use a nested class (enum) because this is specific to albums
@@ -420,6 +428,34 @@ class Album(SpotifyResource, HasGenres, Base):
         back_populates="albums",
     )
 
+    @classmethod
+    def from_json(cls, album_json):
+        release_date_str = album_json["release_date"]
+        release_date_precision = cls.ReleaseDatePrecision(
+            album_json["release_date_precision"]
+        )
+
+        # If the precision isn't to the day, make sure the string is in a YYYY-MM-DD format
+        if release_date_precision is cls.ReleaseDatePrecision.MONTH:
+            # It doesn't matter what we add, so just add 01s
+            release_date_str += "-01"
+        elif release_date_precision is cls.ReleaseDatePrecision.YEAR:
+            release_date_str += "-01-01"
+
+        album = cls(
+            id=album_json["id"],
+            name=album_json["name"],
+            album_type=cls.Type(album_json["album_type"]),
+            release_date=datetime.date.fromisoformat(release_date_str),
+            release_date_precision=release_date_precision,
+            label=album_json["label"],
+            popularity=album_json["popularity"],
+        )
+
+        album.genres = album_json["genres"]
+
+        return album
+
 
 class Track(SpotifyResource, Base):
     __tableargs__ = UniqueConstraint("album_id", "disc_number", "track_number")
@@ -457,7 +493,7 @@ class Track(SpotifyResource, Base):
         cascade="all, delete-orphan",
     )
 
-    # Adding a Artist() to artists will create a new TrackArtist() with its artist_id set
+    # Adding a Artist() to artists will create a new TrackArtist() with its artist set
     # https://docs.sqlalchemy.org/en/13/orm/extensions/associationproxy.html#simplifying-association-objects
     artists: list[Artist] = association_proxy(
         "track_artists",
@@ -465,6 +501,19 @@ class Track(SpotifyResource, Base):
         # https://docs.sqlalchemy.org/en/13/orm/extensions/associationproxy.html#creation-of-new-values
         creator=TrackArtist.from_artist,
     )
+
+    @classmethod
+    def from_json(cls, track_json):
+        return cls(
+            id=track_json["id"],
+            name=track_json["name"],
+            explicit=track_json["explicit"],
+            duration_ms=track_json["duration_ms"],
+            disc_number=track_json["disc_number"],
+            track_number=track_json["track_number"],
+            popularity=track_json["popularity"],
+            is_playable=track_json["is_playable"],
+        )
 
 
 class AudioFeatures(Base):
@@ -531,6 +580,23 @@ class AudioFeatures(Base):
 
     track: Track = relationship("Track", back_populates="audio_features")
 
+    @classmethod
+    def from_json(cls, audio_features_json):
+        return cls(
+            acousticness=audio_features_json["acousticness"],
+            danceability=audio_features_json["danceability"],
+            energy=audio_features_json["energy"],
+            instrumentalness=audio_features_json["instrumentalness"],
+            liveness=audio_features_json["liveness"],
+            speechiness=audio_features_json["speechiness"],
+            valence=audio_features_json["valence"],
+            loudness=audio_features_json["loudness"],
+            key=audio_features_json["key"],
+            mode=cls.Mode(audio_features_json["mode"]),
+            tempo=audio_features_json["tempo"],
+            time_signature=audio_features_json["time_signature"],
+        )
+
 
 # The following classes make use of joined table inheritance
 # This means you can access columns from their parent tables and SQLAlchemy
@@ -545,17 +611,11 @@ class FollowedArtist(Artist):
 # Note that the enums from Album are the same for SavedAlbum afaik
 # type(Album.ReleaseDatePrecision) is type(SavedAlbum.ReleaseDatePrecision)
 class SavedAlbum(Album):
-    added_at: datetime.datetime = Column(
-        DateTime, nullable=False, default=datetime.datetime.now
-    )
+    added_at: datetime.datetime = Column(DateTime, nullable=False)
 
 
 class SavedTrack(Track):
-    added_at: datetime.datetime = Column(
-        DateTime,
-        nullable=False,
-        # default=datetime.datetime.now
-    )
+    added_at: datetime.datetime = Column(DateTime, nullable=False)
 
     # TODO: Generalise this into SpotifyResource?
     # See also https://groups.google.com/g/sqlalchemy/c/F42nv5yA9rw?pli=1
@@ -579,6 +639,13 @@ class SavedTrack(Track):
         )
 
         return saved_track
+
+    @classmethod
+    def from_json(cls, saved_track_json):
+        added_at = isoparse(saved_track_json["added_at"])
+        track = Track.from_json(saved_track_json["track"])
+
+        return cls.from_track(track, added_at)
 
 
 # https://github.com/sqlalchemy/sqlalchemy/wiki/UniqueObjectValidatedOnPending

@@ -3,14 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import date
 from functools import partial
 from math import ceil
 
-import anyio
 from anyio import create_memory_object_stream, create_task_group
-from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
-from dateutil.parser import isoparse
 from dotenv import load_dotenv
 from progress.bar import Bar
 from sqlalchemy.orm import Session
@@ -22,94 +18,16 @@ logger = logging.getLogger("spotifysqlite")
 logger.setLevel(logging.DEBUG)
 
 
-def track_from_json(track_json):
-    return db.Track(
-        id=track_json["id"],
-        name=track_json["name"],
-        explicit=track_json["explicit"],
-        duration_ms=track_json["duration_ms"],
-        disc_number=track_json["disc_number"],
-        track_number=track_json["track_number"],
-        popularity=track_json["popularity"],
-        is_playable=track_json["is_playable"],
-    )
-
-
-def saved_track_from_json(saved_track_json):
-    added_at = isoparse(saved_track_json["added_at"])
-    track = track_from_json(saved_track_json["track"])
-
-    return db.SavedTrack.from_track(track, added_at)
-
-
-def audio_features_from_json(audio_features_json):
-    return db.AudioFeatures(
-        acousticness=audio_features_json["acousticness"],
-        danceability=audio_features_json["danceability"],
-        energy=audio_features_json["energy"],
-        instrumentalness=audio_features_json["instrumentalness"],
-        liveness=audio_features_json["liveness"],
-        speechiness=audio_features_json["speechiness"],
-        valence=audio_features_json["valence"],
-        loudness=audio_features_json["loudness"],
-        key=audio_features_json["key"],
-        mode=db.AudioFeatures.Mode(audio_features_json["mode"]),
-        tempo=audio_features_json["tempo"],
-        time_signature=audio_features_json["time_signature"],
-    )
-
-
-def album_from_json(album_json):
-    release_date_str = album_json["release_date"]
-    release_date_precision = db.Album.ReleaseDatePrecision(
-        album_json["release_date_precision"]
-    )
-
-    # If the precision isn't to the day, make sure the string is in a YYYY-MM-DD format
-    if release_date_precision is db.Album.ReleaseDatePrecision.MONTH:
-        # It doesn't matter what we add, so just add 01s
-        release_date_str += "-01"
-    elif release_date_precision is db.Album.ReleaseDatePrecision.YEAR:
-        release_date_str += "-01-01"
-
-    album = db.Album(
-        id=album_json["id"],
-        name=album_json["name"],
-        album_type=db.Album.Type(album_json["album_type"]),
-        release_date=date.fromisoformat(release_date_str),
-        release_date_precision=release_date_precision,
-        label=album_json["label"],
-        popularity=album_json["popularity"],
-    )
-
-    album.genres = album_json["genres"]
-
-    return album
-
-
-def artist_from_json(artist_json):
-    artist = db.Artist(
-        id=artist_json["id"],
-        name=artist_json["name"],
-        followers=artist_json["followers"]["total"],
-        popularity=artist_json["popularity"],
-    )
-
-    artist.genres = artist_json["genres"]
-
-    return artist
-
-
 async def main():
     """
     `main` will authorise the user with Spotify and then fetch every track from their
     library. For each track in their library it will add these records to the database:
     - The `SavedTrack`
-    - The track's `Artist`s
-        - Including the `Artist`'s `Genre`s
     - The track's `Album`
         - This includes the `Artist`s (and their respective `Genre`s) for that `Album`
         - The `Album` also has `Genre`s
+    - The track's `Artist`s
+        - Including the `Artist`'s `Genre`s
     - The `AudioFeatures` for that track
 
     `main` does this and ensures that there will be no duplicate records in the database.
@@ -325,11 +243,11 @@ async def main():
         albums: dict[str, db.Album] = dict()
 
         for artist_json in artist_jsons.values():
-            artist = artist_from_json(artist_json)
+            artist = db.Artist.from_json(artist_json)
             artists[artist.id] = artist
 
         for album_json in album_jsons.values():
-            album = album_from_json(album_json)
+            album = db.Album.from_json(album_json)
 
             # Add the artists for the album
             for artist_id in map(lambda a: a["id"], album_json["artists"]):
@@ -339,12 +257,12 @@ async def main():
             albums[album.id] = album
 
         for saved_track_json in saved_track_jsons.values():
-            saved_track = saved_track_from_json(saved_track_json)
+            saved_track = db.SavedTrack.from_json(saved_track_json)
 
             # Add the audio features
             if saved_track.id in audio_features_jsons:
                 audio_features_json = audio_features_jsons[saved_track.id]
-                audio_features = audio_features_from_json(audio_features_json)
+                audio_features = db.AudioFeatures.from_json(audio_features_json)
                 saved_track.audio_features = audio_features
 
             track_json = saved_track_json["track"]
