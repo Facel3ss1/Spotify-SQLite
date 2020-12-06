@@ -25,7 +25,7 @@ from sqlalchemy import (
     event,
     inspect,
 )
-from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.engine import Engine
 from sqlalchemy.ext.associationproxy import association_proxy
 from sqlalchemy.ext.declarative import (
     as_declarative,
@@ -36,7 +36,6 @@ from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.ext.orderinglist import ordering_list
 from sqlalchemy.orm import (
     Session,
-    backref,
     object_session,
     relationship,
     validates,
@@ -47,7 +46,6 @@ from sqlalchemy.orm.attributes import get_history
 # https://docs.sqlalchemy.org/en/13/orm/extensions/declarative/relationships.html
 
 # TODO: Views?
-# TODO: https://docs.sqlalchemy.org/en/13/orm/backref.html
 # TODO: Sorting Artists with 'The' taken into account?
 # TODO: https://click.palletsprojects.com/en/7.x/
 # TODO: https://docs.python-guide.org/writing/structure/
@@ -187,7 +185,6 @@ def auto_delete_orphans(*attr_keys):
             if key in attr_keys and not has_inherited_table(parent_class):
                 # The target_class is what we will try to delete orphans from
                 target_class = attr.property.mapper.class_
-                # TODO: backref?
                 back_populates = attr.property.back_populates
 
                 if not back_populates:
@@ -253,10 +250,15 @@ class TrackArtist(Base):
     # We use an ordering_list to put the artists on a track in the correct order
     artist_order: int = Column(Integer, nullable=False)
 
+    track: Track = relationship("Track", back_populates="track_artists")
+    artist: Artist = relationship("Artist", back_populates="track_artists")
+
     @classmethod
     def from_artist(cls, artist: Artist):
-        # The track_id will be added in due to its relationship with TrackArtist
-        return cls(artist_id=artist.id)
+        # The track will be added in due to its relationship with TrackArtist
+        track_artist = cls()
+        track_artist.artist = artist
+        return track_artist
 
 
 # TODO: Index for name?
@@ -364,13 +366,15 @@ class Artist(SpotifyResource, HasGenres, Base):
         Integer, CheckConstraint("popularity BETWEEN 0 AND 100"), nullable=False
     )
 
-    albums: list["Album"] = relationship(
+    albums: list[Album] = relationship(
         "Album",
         order_by="desc(Album.release_date)",
         secondary=album_artist,
         back_populates="artists",
     )
-    track_artists: list[TrackArtist] = relationship("TrackArtist", backref="artist")
+    track_artists: list[TrackArtist] = relationship(
+        "TrackArtist", back_populates="artist"
+    )
     # TODO: Is this useful?
     tracks = association_proxy("track_artists", "track")
 
@@ -401,11 +405,11 @@ class Album(SpotifyResource, HasGenres, Base):
         Integer, CheckConstraint("popularity BETWEEN 0 AND 100"), nullable=False
     )
 
-    tracks: list["Track"] = relationship(
+    tracks: list[Track] = relationship(
         "Track",
         # https://github.com/sqlalchemy/sqlalchemy/issues/4708
         order_by="[Track.disc_number, Track.track_number]",
-        backref="album",
+        back_populates="album",
         # https://docs.sqlalchemy.org/en/13/orm/cascades.html
         cascade="all, delete-orphan",
     )
@@ -437,18 +441,19 @@ class Track(SpotifyResource, Base):
     )
     is_playable: bool = Column(Boolean, nullable=False, default=True)
 
+    album: Album = relationship("Album", back_populates="tracks")
     # https://docs.sqlalchemy.org/en/13/orm/extensions/orderinglist.html
     track_artists: list[TrackArtist] = relationship(
         "TrackArtist",
         order_by="TrackArtist.artist_order",
         collection_class=ordering_list("artist_order"),
-        backref="track",
+        back_populates="track",
     )
     # https://docs.sqlalchemy.org/en/13/orm/basic_relationships.html#one-to-one
-    audio_features: "AudioFeatures" = relationship(
+    audio_features: AudioFeatures = relationship(
         "AudioFeatures",
         uselist=False,
-        backref="track",
+        back_populates="track",
         cascade="all, delete-orphan",
     )
 
@@ -523,6 +528,8 @@ class AudioFeatures(Base):
         CheckConstraint("time_signature >= 0"),
         nullable=False,
     )
+
+    track: Track = relationship("Track", back_populates="audio_features")
 
 
 # The following classes make use of joined table inheritance
@@ -615,8 +622,8 @@ def create_engine(db_file: str, **kwargs) -> Engine:
             "regexp", 2, lambda x, y: 1 if re.search(x, y) else 0
         )
 
-        # TODO: Foreign keys won't be enforced, we're not ready yet
-        dbapi_connection.execute("PRAGMA foreign_keys = OFF;")
+        # SQLite doesn't enforce foreign keys by default so we turn that on
+        dbapi_connection.execute("PRAGMA foreign_keys = ON;")
 
     engine = sqlalchemy.create_engine(f"sqlite:///{db_file}", **kwargs)
     Base.metadata.create_all(engine)
@@ -667,4 +674,3 @@ if __name__ == "__main__":
 
     session.delete(mgmt)
     session.commit()
-    #
