@@ -53,8 +53,9 @@ class SpotifySession(AsyncOAuth2Client):
 
     API_BASE_URL = "https://api.spotify.com"
 
-    async def authorize_spotify(self, show_dialog: bool = False):
-        # TODO: Persist the previous token
+    async def authorize_spotify(
+        self, *, show_dialog: bool = False, open_browser: bool = True
+    ):
         # Authorize with the Spotify API using OAuth2
         # https://docs.authlib.org/en/stable/client/oauth2.html
 
@@ -66,8 +67,11 @@ class SpotifySession(AsyncOAuth2Client):
         )
 
         # TODO: This is really annoying please make it stop HTTP server pls
+        # Or we could save the previous token
         print(f"Opening {authorization_url} in web browser...")
-        webbrowser.open_new(authorization_url)
+
+        if open_browser:
+            webbrowser.open_new(authorization_url)
 
         authorization_response = input("Enter the full callback URL: ")
 
@@ -99,9 +103,9 @@ class SpotifySession(AsyncOAuth2Client):
     async def get_multiple_albums(
         self, tx_album: MemoryObjectSendStream, *, ids: list[str]
     ):
-        if len(ids) > 50 or len(ids) < 1:
+        if len(ids) > 20 or len(ids) < 1:
             raise ValueError(
-                f"The Get Multiple Albums endpoint only accepts between 1 and 50 IDs! (attempted {len(ids)} IDs)"
+                f"The Get Multiple Albums endpoint only accepts between 1 and 20 IDs! (attempted {len(ids)} IDs)"
             )
 
         r = await self.get("/v1/albums", params={"ids": ",".join(ids)})

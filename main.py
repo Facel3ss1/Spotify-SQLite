@@ -17,6 +17,11 @@ from spotifysqlite.api import SpotifySession, batcher
 logger = logging.getLogger("spotifysqlite")
 logger.setLevel(logging.DEBUG)
 
+# TODO: Followed Artists
+# TODO: Saved Albums
+# TODO: Syncing algorithm
+# TODO: Playlist support?
+
 
 async def main():
     """
