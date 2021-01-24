@@ -16,7 +16,6 @@ python-dotenv = "*"
 anyio = "*"
 tenacity = "*"
 python-dateutil = "*"
-progress = "*"
 
 [requires]
 python_version = "3.9"

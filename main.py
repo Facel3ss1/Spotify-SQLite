@@ -3,24 +3,333 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from functools import partial
+from functools import cache, partial
 from math import ceil
+from typing import Callable, Coroutine, Union
 
 from anyio import create_memory_object_stream, create_task_group
+from anyio.streams.memory import MemoryObjectSendStream
 from dotenv import load_dotenv
-from progress.bar import Bar
 from sqlalchemy.orm import Session
 
+import spotifysqlite.api as api
 import spotifysqlite.db as db
-from spotifysqlite.api import SpotifySession, batcher
 
 logger = logging.getLogger("spotifysqlite")
 logger.setLevel(logging.DEBUG)
 
-# TODO: Followed Artists
-# TODO: Saved Albums
+# TODO: https://github.com/tqdm/tqdm
 # TODO: Syncing algorithm
 # TODO: Playlist support?
+
+
+class Response:
+    _json: dict
+    _is_saved: bool
+
+    @property
+    def is_saved(self):
+        return self._is_saved
+
+    def __init__(self, json: dict, is_saved: bool) -> None:
+        self._json = json
+        self._is_saved = is_saved
+
+    def to_db_object():
+        raise NotImplementedError
+
+    @property
+    def id() -> str:
+        raise NotImplementedError
+
+    @staticmethod
+    def set_of_ids(responses: list[Response]) -> set[str]:
+        return set(map(lambda r: r.id, responses))
+
+
+class TrackResponse(Response):
+    @cache
+    def to_db_object(self) -> Union[db.Track, db.SavedTrack]:
+        if self._is_saved:
+            return db.SavedTrack.from_json(self._json)
+        else:
+            return db.Track.from_json(self._json)
+
+    @property
+    def _track_json(self) -> dict:
+        if self._is_saved:
+            return self._json["track"]
+        else:
+            return self._json
+
+    @property
+    def id(self) -> str:
+        return self._track_json["id"]
+
+    def required_artists(self) -> list[str]:
+        return list(map(lambda a: a["id"], self._track_json["artists"]))
+
+    def required_album(self) -> str:
+        return self._track_json["album"]["id"]
+
+
+class ArtistResponse(Response):
+    @cache
+    def to_db_object(self) -> Union[db.Artist, db.FollowedArtist]:
+        if self._is_saved:
+            return db.FollowedArtist.from_json(self._json)
+        else:
+            return db.Artist.from_json(self._json)
+
+    @property
+    def id(self) -> str:
+        return self._json["id"]
+
+
+class AlbumResponse(Response):
+    @cache
+    def to_db_object(self) -> Union[db.Album, db.FollowedArtist]:
+        if self._is_saved:
+            return db.SavedAlbum.from_json(self._json)
+        else:
+            return db.Album.from_json(self._json)
+
+    @property
+    def _album_json(self) -> dict:
+        if self._is_saved:
+            return self._json["album"]
+        else:
+            return self._json
+
+    @property
+    def id(self) -> str:
+        return self._album_json["id"]
+
+    def required_artists(self) -> list[str]:
+        return list(map(lambda a: a["id"], self._album_json["artists"]))
+
+
+class SpotifyDownloader:
+    # https://developer.spotify.com/documentation/general/guides/scopes/
+    SCOPE = [
+        "user-library-read",
+        "user-follow-read",
+        # "user-top-read",
+        # "user-read-recently-played",
+        # "playlist-read-private",
+        # "playlist-read-collaborative",
+    ]
+
+    spotify: api.SpotifySession
+
+    def __init__(
+        self, *, client_id: str, client_secret: str, redirect_uri: str
+    ) -> None:
+        self.spotify = api.SpotifySession(
+            client_id,
+            client_secret,
+            scope=SpotifyDownloader.SCOPE,
+            redirect_uri=redirect_uri,
+        )
+
+    async def __aenter__(self):
+        await self.spotify.authorize_spotify()
+        await self.spotify.__aenter__()
+        return self
+
+    async def __aexit__(self, type, value, traceback):
+        await self.spotify.__aexit__(type, value, traceback)
+
+    async def fetch_saved_tracks(self) -> list[TrackResponse]:
+        PAGE_SIZE = 50
+
+        r = await self.spotify.get(
+            "/v1/me/tracks", params={"limit": 1, "market": "from_token"}
+        )
+
+        paging_object = r.json()
+        # The total no. of tracks in the user's library
+        total_tracks = paging_object["total"]
+        # How many requests it will take to get all the tracks from the API
+        total_pages = ceil(total_tracks / PAGE_SIZE)
+
+        tx_saved_track, rx_saved_track = create_memory_object_stream()
+
+        async with create_task_group() as tg:
+            async with tx_saved_track:
+                # Fetch all the saved tracks
+                for page in range(total_pages):
+                    await tg.spawn(
+                        partial(
+                            self.spotify.get_saved_tracks,
+                            tx_saved_track.clone(),
+                            limit=PAGE_SIZE,
+                            offset=page * PAGE_SIZE,
+                        )
+                    )
+
+            return [TrackResponse(t, True) async for t in rx_saved_track]
+
+    async def fetch_saved_albums(self) -> list[AlbumResponse]:
+        PAGE_SIZE = 50
+
+        r = await self.spotify.get(
+            "/v1/me/albums", params={"limit": 1, "market": "from_token"}
+        )
+
+        paging_object = r.json()
+        total_albums = paging_object["total"]
+        total_pages = ceil(total_albums / PAGE_SIZE)
+
+        tx_saved_album, rx_saved_album = create_memory_object_stream()
+
+        async with create_task_group() as tg:
+            async with tx_saved_album:
+                # Fetch all the saved tracks
+                for page in range(total_pages):
+                    await tg.spawn(
+                        partial(
+                            self.spotify.get_saved_albums,
+                            tx_saved_album.clone(),
+                            limit=PAGE_SIZE,
+                            offset=page * PAGE_SIZE,
+                        )
+                    )
+
+            return [AlbumResponse(a, True) async for a in rx_saved_album]
+
+    async def fetch_followed_artists(self) -> list[ArtistResponse]:
+        PAGE_SIZE = 50
+
+        r = await self.spotify.get(
+            "/v1/me/following", params={"type": "artist", "limit": 1}
+        )
+
+        paging_object = r.json()
+        total_artists = paging_object["artists"]["total"]
+
+        artists: list[ArtistResponse] = list()
+        after: str = None
+
+        while len(artists) < total_artists:
+            page = await self.spotify.get_followed_artists(limit=PAGE_SIZE, after=after)
+            artists.extend(map(lambda a: ArtistResponse(a, True), page))
+            after = artists[-1].id
+
+        return artists
+
+    @staticmethod
+    async def batcher(
+        items: list,
+        tx_out: MemoryObjectSendStream,
+        batch_coro: Callable[[MemoryObjectSendStream, list], Coroutine],
+        *,
+        batch_size: int,
+    ):
+        """
+        Takes a list of items, and splits it up into batches of size `batch_size`,
+        then the batches are processed using `batch_coro` and the processed items are sent
+        back using the `tx_out` stream.
+
+        For each batch, `batch_coro` is spawned, and it takes the batch and a send stream as
+        arguments. `batch_coro` is expected to process the batch, and then send back the
+        processed items induvidually using the send stream. These processed items are then
+        recieved by the batcher and finally sent back to the caller.
+        """
+
+        batches: list[list] = [
+            items[offset : offset + batch_size]
+            for offset in range(0, len(items), batch_size)
+        ]
+
+        async with create_task_group() as tg:
+            async with tx_out:
+                for batch in batches:
+                    await tg.spawn(batch_coro, tx_out.clone(), batch)
+
+    async def fetch_multiple_albums(self, ids: set[str]) -> list[AlbumResponse]:
+        PAGE_SIZE = 20
+
+        tx_album, rx_album = create_memory_object_stream()
+
+        async with create_task_group() as tg:
+            async with tx_album:
+                await tg.spawn(
+                    partial(
+                        self.batcher,
+                        list(ids),
+                        tx_album.clone(),
+                        lambda tx, b: self.spotify.get_multiple_albums(tx, ids=b),
+                        batch_size=PAGE_SIZE,
+                    )
+                )
+
+            return [AlbumResponse(a, False) async for a in rx_album]
+
+    async def fetch_multiple_artists(self, ids: set[str]) -> list[ArtistResponse]:
+        PAGE_SIZE = 50
+
+        tx_artist, rx_artist = create_memory_object_stream()
+
+        async with create_task_group() as tg:
+            async with tx_artist:
+                await tg.spawn(
+                    partial(
+                        self.batcher,
+                        list(ids),
+                        tx_artist.clone(),
+                        lambda tx, b: self.spotify.get_multiple_artists(tx, ids=b),
+                        batch_size=PAGE_SIZE,
+                    )
+                )
+
+            return [ArtistResponse(a, False) async for a in rx_artist]
+
+    async def fetch_multiple_audio_features(
+        self, ids: set[str]
+    ) -> dict[str, db.AudioFeatures]:
+        PAGE_SIZE = 100
+
+        tx_audio_features, rx_audio_features = create_memory_object_stream()
+
+        async with create_task_group() as tg:
+            async with tx_audio_features:
+                await tg.spawn(
+                    partial(
+                        self.batcher,
+                        list(ids),
+                        tx_audio_features.clone(),
+                        lambda tx, b: self.spotify.get_multiple_audio_features(
+                            tx, ids=b
+                        ),
+                        batch_size=PAGE_SIZE,
+                    )
+                )
+
+            return {
+                a["id"]: db.AudioFeatures.from_json(a) async for a in rx_audio_features
+            }
+
+    @staticmethod
+    def all_required_artists(
+        responses: Union[list[TrackResponse], list[AlbumResponse]]
+    ) -> set[str]:
+        artists = set()
+
+        for res in responses:
+            for artist in res.required_artists():
+                artists.add(artist)
+
+        return artists
+
+    @staticmethod
+    def all_required_albums(responses: list[TrackResponse]) -> set[str]:
+        albums = set()
+
+        for res in responses:
+            albums.add(res.required_album())
+
+        return albums
 
 
 async def main():
@@ -37,192 +346,59 @@ async def main():
 
     `main` does this and ensures that there will be no duplicate records in the database.
     """
-    # https://developer.spotify.com/documentation/general/guides/scopes/
-    SCOPE = [
-        "user-library-read",
-        "user-follow-read",
-        # "user-top-read",
-        # "user-read-recently-played",
-        # "playlist-read-private",
-        # "playlist-read-collaborative",
-    ]
 
     CLIENT_ID = os.getenv("CLIENT_ID")
     CLIENT_SECRET = os.getenv("CLIENT_SECRET")
     REDIRECT_URI = os.getenv("REDIRECT_URI")
 
-    async with SpotifySession(
-        CLIENT_ID, CLIENT_SECRET, scope=SCOPE, redirect_uri=REDIRECT_URI
-    ) as spotify:
-        await spotify.authorize_spotify()
+    if CLIENT_ID is None:
+        raise Exception("CLIENT_ID not found in environment")
 
-        # 1. Fetch all the saved tracks and mark all the artists and albums as pending
+    if CLIENT_SECRET is None:
+        raise Exception("CLIENT_SECRET not found in environment")
 
-        r = await spotify.get(
-            "/v1/me/tracks", params={"limit": 1, "market": "from_token"}
+    if REDIRECT_URI is None:
+        raise Exception("REDIRECT_URI not found in environment")
+
+    async with SpotifyDownloader(
+        client_id=CLIENT_ID,
+        client_secret=CLIENT_SECRET,
+        redirect_uri=REDIRECT_URI,
+    ) as dl:
+        # 1. Fetch the users library
+        print("Fetching Library...")
+        saved_tracks = await dl.fetch_saved_tracks()
+        saved_albums = await dl.fetch_saved_albums()
+        followed_artists = await dl.fetch_followed_artists()
+
+        tracks_list = saved_tracks
+
+        # 2. Fetch the required albums from the saved tracks
+        required_albums: set[str] = dl.all_required_albums(
+            tracks_list
+        ) - Response.set_of_ids(saved_albums)
+        print(f"Fetching {len(required_albums)} Albums...")
+        fetched_albums = await dl.fetch_multiple_albums(required_albums)
+        albums_list = saved_albums + fetched_albums
+
+        # 3. Fetch the required artists from the saved tracks, the saved albums, and the fetched albums
+        required_artists: set[str] = (
+            dl.all_required_artists(tracks_list) | dl.all_required_artists(albums_list)
+        ) - Response.set_of_ids(followed_artists)
+        print(f"Fetching {len(required_artists)} Artists...")
+        fetched_artists = await dl.fetch_multiple_artists(required_artists)
+        artists_list = followed_artists + fetched_artists
+
+        tracks: dict[str, TrackResponse] = {t.id: t for t in tracks_list}
+        albums: dict[str, AlbumResponse] = {a.id: a for a in albums_list}
+        artists: dict[str, ArtistResponse] = {a.id: a for a in artists_list}
+
+        # TODO: Fetching the audio features can be done in parallel
+        print(f"Fetching {len(tracks_list)} Audio Features...")
+        audio_features = await dl.fetch_multiple_audio_features(
+            Response.set_of_ids(tracks_list)
         )
-        paging_object = r.json()
 
-        # The 'Get Saved Tracks' endpoint returns pages with a max size of 50 tracks
-        PAGE_SIZE = 50
-
-        # The total no. of tracks in the user's library
-        total_tracks = paging_object["total"]
-        # How many requests it will take to get all the tracks from the API
-        total_pages = ceil(total_tracks / PAGE_SIZE)
-
-        logger.info(f"Fetching {total_tracks} Tracks...")
-        bar = Bar("Fetching Tracks...", max=total_tracks)
-
-        # These all map IDs to the json response for that ID
-        saved_track_jsons: dict[str, dict] = dict()
-        album_jsons: dict[str, dict] = dict()
-        artist_jsons: dict[str, dict] = dict()
-        audio_features_jsons: dict[str, dict] = dict()
-
-        pending_albums: set[str] = set()
-        pending_artists: set[str] = set()
-
-        tx_saved_track, rx_saved_track = create_memory_object_stream()
-
-        async with create_task_group() as tg:
-            async with tx_saved_track:
-                # Fetch all the saved tracks
-                for page in range(total_pages):
-                    await tg.spawn(
-                        partial(
-                            spotify.get_saved_tracks,
-                            tx_saved_track.clone(),
-                            limit=PAGE_SIZE,
-                            offset=page * PAGE_SIZE,
-                        )
-                    )
-
-            async for saved_track_json in rx_saved_track:
-                track = saved_track_json["track"]
-
-                # Add the json response to saved_track_jsons
-                track_id = track["id"]
-                saved_track_jsons[track_id] = saved_track_json
-
-                # Mark the albums and artists as pending
-                album_id = track["album"]["id"]
-                pending_albums.add(album_id)
-
-                for artist in track["artists"]:
-                    artist_id = artist["id"]
-                    pending_artists.add(artist_id)
-
-                bar.next()
-
-        bar.finish()
-
-        # 2. Fetch all the pending albums from step 1 and mark any new artists as pending
-        logger.info(f"Fetching {len(pending_albums)} Albums...")
-        bar = Bar("Fetching Albums...", max=len(pending_albums))
-
-        tx_album_id, rx_album_id = create_memory_object_stream()
-        tx_album, rx_album = create_memory_object_stream()
-
-        async with create_task_group() as tg:
-            async with tx_album:
-                # Spawn a batcher which will request the albums in batches of 20
-                await tg.spawn(
-                    partial(
-                        batcher,
-                        rx_album_id,
-                        tx_album.clone(),
-                        lambda tx, b: spotify.get_multiple_albums(tx, ids=b),
-                        batch_size=20,
-                    )
-                )
-
-                async with tx_album_id:
-                    while len(pending_albums) > 0:
-                        album_id = pending_albums.pop()
-                        await tx_album_id.send(album_id)
-
-            async for album in rx_album:
-                # Add the json response to album_jsons
-                album_id = album["id"]
-                album_jsons[album_id] = album
-
-                # Mark the album's artists as pending if they aren't already
-                for artist in album["artists"]:
-                    artist_id = artist["id"]
-
-                    if artist_id not in pending_artists:
-                        pending_artists.add(artist_id)
-
-                bar.next()
-
-        bar.finish()
-
-        # 3. Fetch all the pending artists from step 1 and 2
-        logger.info(f"Fetching {len(pending_artists)} Artists...")
-        bar = Bar("Fetching Artists...", max=len(pending_artists))
-
-        tx_artist_id, rx_artist_id = create_memory_object_stream()
-        tx_artist, rx_artist = create_memory_object_stream()
-
-        async with create_task_group() as tg:
-            async with tx_artist:
-                await tg.spawn(
-                    partial(
-                        batcher,
-                        rx_artist_id,
-                        tx_artist.clone(),
-                        lambda tx, b: spotify.get_multiple_artists(tx, ids=b),
-                        batch_size=50,
-                    )
-                )
-
-                async with tx_artist_id:
-                    while len(pending_artists) > 0:
-                        artist_id = pending_artists.pop()
-                        await tx_artist_id.send(artist_id)
-
-            async for artist in rx_artist:
-                # Add the json response to artist_jsons
-                artist_id = artist["id"]
-                artist_jsons[artist_id] = artist
-
-                bar.next()
-
-        bar.finish()
-
-        # 4. Fetch the Audio Features for each track
-        logger.info("Fetching Audio Features...")
-        bar = Bar("Fetching Audio Features...", max=len(saved_track_jsons))
-
-        tx_track_id, rx_track_id = create_memory_object_stream()
-        tx_audio_features, rx_audio_features = create_memory_object_stream()
-
-        async with create_task_group() as tg:
-            async with tx_audio_features:
-                await tg.spawn(
-                    partial(
-                        batcher,
-                        rx_track_id,
-                        tx_audio_features.clone(),
-                        lambda tx, b: spotify.get_multiple_audio_features(tx, ids=b),
-                        batch_size=100,
-                    )
-                )
-
-                async with tx_track_id:
-                    for track_id in saved_track_jsons.keys():
-                        await tx_track_id.send(track_id)
-
-            async for audio_features in rx_audio_features:
-                track_id = audio_features["id"]
-                audio_features_jsons[track_id] = audio_features
-                bar.next()
-
-        bar.finish()
-
-        # 5. Loop through the JSON responses to create and add the DB objects
-        logger.info("Setting up Database...")
         print("Setting up Database...")
 
         filename = "test.db"
@@ -240,53 +416,29 @@ async def main():
         engine = db.create_engine(filename)
         session = Session(engine)
 
-        logger.info("Adding to Database...")
-        bar = Bar("Adding to Database...", max=len(saved_track_jsons))
+        print("Adding Library to database..")
 
-        # This maps the IDs to the database objects
-        artists: dict[str, db.Artist] = dict()
-        albums: dict[str, db.Album] = dict()
+        # 4. Add artists to the albums
+        for album in albums.values():
+            album_db = album.to_db_object()
 
-        for artist_json in artist_jsons.values():
-            artist = db.Artist.from_json(artist_json)
-            artists[artist.id] = artist
+            album_db.artists = list(
+                map(lambda a: artists[a].to_db_object(), album.required_artists())
+            )
 
-        for album_json in album_jsons.values():
-            album = db.Album.from_json(album_json)
+        # 5. Add albums, artists, and audio features to the tracks, and add the tracks to the session
+        for track in tracks.values():
+            track_db = track.to_db_object()
 
-            # Add the artists for the album
-            for artist_id in map(lambda a: a["id"], album_json["artists"]):
-                artist = artists[artist_id]
-                album.artists.append(artist)
+            track_db.album = albums[track.required_album()].to_db_object()
 
-            albums[album.id] = album
+            track_db.artists = list(
+                map(lambda a: artists[a].to_db_object(), track.required_artists())
+            )
 
-        for saved_track_json in saved_track_jsons.values():
-            saved_track = db.SavedTrack.from_json(saved_track_json)
+            track_db.audio_features = audio_features[track.id]
 
-            # Add the audio features
-            if saved_track.id in audio_features_jsons:
-                audio_features_json = audio_features_jsons[saved_track.id]
-                audio_features = db.AudioFeatures.from_json(audio_features_json)
-                saved_track.audio_features = audio_features
-
-            track_json = saved_track_json["track"]
-
-            # Add the album
-            album_id = track_json["album"]["id"]
-            album = albums[album_id]
-            saved_track.album = album
-
-            # Add the artists for the track
-            for artist_id in map(lambda a: a["id"], track_json["artists"]):
-                artist = artists[artist_id]
-                saved_track.artists.append(artist)
-
-            session.add(saved_track)
-
-            bar.next()
-
-        bar.finish()
+            session.add(track_db)
 
         print("Saving Database...")
         session.commit()

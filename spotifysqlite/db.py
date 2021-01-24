@@ -115,8 +115,10 @@ class SpotifyResource:
 
     name: str = Column(Text, nullable=False)
     is_saved: bool = Column(Boolean, nullable=False)
+    popularity: int = Column(
+        Integer, CheckConstraint("popularity BETWEEN 0 AND 100"), nullable=False
+    )
 
-    # TODO: Class property?
     @classmethod
     def resource_name(cls) -> str:
         """
@@ -357,9 +359,6 @@ class HasGenres:
 
 class Artist(SpotifyResource, HasGenres, Base):
     followers: int = Column(Integer, CheckConstraint("followers >= 0"), nullable=False)
-    popularity: int = Column(
-        Integer, CheckConstraint("popularity BETWEEN 0 AND 100"), nullable=False
-    )
 
     albums: list[Album] = relationship(
         "Album",
@@ -374,12 +373,12 @@ class Artist(SpotifyResource, HasGenres, Base):
     tracks = association_proxy("track_artists", "track")
 
     @classmethod
-    def from_json(cls, artist_json):
+    def from_json(cls, artist_json) -> Artist:
         artist = cls(
             id=artist_json["id"],
             name=artist_json["name"],
-            followers=artist_json["followers"]["total"],
             popularity=artist_json["popularity"],
+            followers=artist_json["followers"]["total"],
         )
 
         artist.genres = artist_json["genres"]
@@ -409,9 +408,6 @@ class Album(SpotifyResource, HasGenres, Base):
         Enum(ReleaseDatePrecision), nullable=False, default=ReleaseDatePrecision.DAY
     )
     label: str = Column(Text, nullable=False)
-    popularity: int = Column(
-        Integer, CheckConstraint("popularity BETWEEN 0 AND 100"), nullable=False
-    )
 
     tracks: list[Track] = relationship(
         "Track",
@@ -429,7 +425,7 @@ class Album(SpotifyResource, HasGenres, Base):
     )
 
     @classmethod
-    def from_json(cls, album_json):
+    def from_json(cls, album_json) -> Album:
         release_date_str = album_json["release_date"]
         release_date_precision = cls.ReleaseDatePrecision(
             album_json["release_date_precision"]
@@ -445,11 +441,11 @@ class Album(SpotifyResource, HasGenres, Base):
         album = cls(
             id=album_json["id"],
             name=album_json["name"],
+            popularity=album_json["popularity"],
             album_type=cls.Type(album_json["album_type"]),
             release_date=datetime.date.fromisoformat(release_date_str),
             release_date_precision=release_date_precision,
             label=album_json["label"],
-            popularity=album_json["popularity"],
         )
 
         album.genres = album_json["genres"]
@@ -471,9 +467,6 @@ class Track(SpotifyResource, Base):
     )
     track_number: int = Column(
         Integer, CheckConstraint("track_number > 0"), nullable=False
-    )
-    popularity: int = Column(
-        Integer, CheckConstraint("popularity BETWEEN 0 AND 100"), nullable=False
     )
     is_playable: bool = Column(Boolean, nullable=False, default=True)
 
@@ -503,15 +496,15 @@ class Track(SpotifyResource, Base):
     )
 
     @classmethod
-    def from_json(cls, track_json):
+    def from_json(cls, track_json) -> Track:
         return cls(
             id=track_json["id"],
             name=track_json["name"],
+            popularity=track_json["popularity"],
             explicit=track_json["explicit"],
             duration_ms=track_json["duration_ms"],
             disc_number=track_json["disc_number"],
             track_number=track_json["track_number"],
-            popularity=track_json["popularity"],
             is_playable=track_json["is_playable"],
         )
 
@@ -581,7 +574,7 @@ class AudioFeatures(Base):
     track: Track = relationship("Track", back_populates="audio_features")
 
     @classmethod
-    def from_json(cls, audio_features_json):
+    def from_json(cls, audio_features_json) -> AudioFeatures:
         return cls(
             acousticness=audio_features_json["acousticness"],
             danceability=audio_features_json["danceability"],
@@ -604,8 +597,26 @@ class AudioFeatures(Base):
 
 
 # TODO: With that being said, single table inheritance might be better for this?
+# TODO: Generalise from_unsaved methods into SpotifyResource?
+# See also https://groups.google.com/g/sqlalchemy/c/F42nv5yA9rw?pli=1
+# See also https://github.com/zzzeek/test_sqlalchemy/issues/648
 class FollowedArtist(Artist):
-    pass
+    @classmethod
+    def from_artist(cls, artist: Artist):
+        followed_artist = cls(
+            id=artist.id,
+            name=artist.name,
+            popularity=artist.popularity,
+            followers=artist.followers,
+        )
+
+        return followed_artist
+
+    @classmethod
+    def from_json(cls, followed_artist_json) -> FollowedArtist:
+        artist = Artist.from_json(followed_artist_json)
+
+        return cls.from_artist(artist)
 
 
 # Note that the enums from Album are the same for SavedAlbum afaik
@@ -613,27 +624,46 @@ class FollowedArtist(Artist):
 class SavedAlbum(Album):
     added_at: datetime.datetime = Column(DateTime, nullable=False)
 
+    @classmethod
+    def from_album(cls, album: Album, added_at: datetime.datetime) -> SavedAlbum:
+        saved_album = cls(
+            id=album.id,
+            name=album.name,
+            popularity=album.popularity,
+            album_type=album.album_type,
+            release_date=album.release_date,
+            release_date_precision=album.release_date_precision,
+            label=album.label,
+            added_at=added_at,
+        )
+
+        return saved_album
+
+    @classmethod
+    def from_json(cls, saved_album_json) -> SavedAlbum:
+        added_at = isoparse(saved_album_json["added_at"])
+        album = Album.from_json(saved_album_json["album"])
+
+        return cls.from_album(album, added_at)
+
 
 class SavedTrack(Track):
     added_at: datetime.datetime = Column(DateTime, nullable=False)
 
-    # TODO: Generalise this into SpotifyResource?
-    # See also https://groups.google.com/g/sqlalchemy/c/F42nv5yA9rw?pli=1
-    # See also https://github.com/zzzeek/test_sqlalchemy/issues/648
     @classmethod
-    def from_track(cls, track: Track, added_at: datetime.datetime):
+    def from_track(cls, track: Track, added_at: datetime.datetime) -> SavedTrack:
         # TODO: Use object_session to delete original track
         # Or use session.merge with SpotifyResources
 
         saved_track = cls(
             id=track.id,
             name=track.name,
+            popularity=track.popularity,
             explicit=track.explicit,
             duration_ms=track.duration_ms,
             album_id=track.album_id,
             disc_number=track.disc_number,
             track_number=track.track_number,
-            popularity=track.popularity,
             is_playable=track.is_playable,
             added_at=added_at,
         )
@@ -641,7 +671,7 @@ class SavedTrack(Track):
         return saved_track
 
     @classmethod
-    def from_json(cls, saved_track_json):
+    def from_json(cls, saved_track_json) -> SavedAlbum:
         added_at = isoparse(saved_track_json["added_at"])
         track = Track.from_json(saved_track_json["track"])
 
@@ -695,49 +725,3 @@ def create_engine(db_file: str, **kwargs) -> Engine:
     engine = sqlalchemy.create_engine(f"sqlite:///{db_file}", **kwargs)
     Base.metadata.create_all(engine)
     return engine
-
-
-if __name__ == "__main__":
-    engine = create_engine(":memory:", echo=True)
-
-    queen = Artist(
-        id="1dfeR4HaWDbWqFHLkxsg1d", name="Queen", followers=745673, popularity=100
-    )
-    queen.genres = ["rock", "rock opera"]
-
-    mgmt = FollowedArtist(
-        id="0SwO7SWeDHJijQ3XNS7xEE", name="MGMT", followers=47243, popularity=100
-    )
-    mgmt.genres = ["rock", "modern rock"]
-
-    a_night_at_the_opera = Album(
-        id="1GbtB4zTqAsyfZEsm1RZfx",
-        name="A Night at the Opera",
-        album_type=Album.Type.ALBUM,
-        release_date=datetime.date.fromisoformat("1975-01-01"),
-        release_date_precision=Album.ReleaseDatePrecision.YEAR,
-        label="Queen Productions Ltd",
-        popularity=100,
-    )
-
-    a_night_at_the_opera.artists.append(queen)
-    a_night_at_the_opera.genres.append("rock")
-
-    bohemian_rhapsody = SavedTrack(
-        id="4u7EnebtmKWzUH433cf5Qv",
-        name="Bohemian Rhapsody",
-        explicit=False,
-        duration_ms=10000,
-        track_number=11,
-        popularity=100,
-    )
-
-    bohemian_rhapsody.album = a_night_at_the_opera
-    bohemian_rhapsody.artists.append(queen)
-
-    session = Session(engine)
-    session.add_all([mgmt, bohemian_rhapsody])
-    session.commit()
-
-    session.delete(mgmt)
-    session.commit()

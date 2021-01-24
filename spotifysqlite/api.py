@@ -1,37 +1,21 @@
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
 import webbrowser
-from functools import partial
-from math import ceil
-from typing import Any, Callable, Coroutine, Optional, TypedDict
 from urllib.parse import urljoin
 
-import anyio
 import httpx
-from anyio import create_memory_object_stream, create_task_group
-from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
+from anyio.streams.memory import MemoryObjectSendStream
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 from tenacity import RetryCallState, retry
 from tenacity.retry import retry_if_exception
 from tenacity.stop import stop_after_attempt
 from tenacity.wait import wait_random
 
-# https://www.python.org/dev/peps/pep-0589/
-# class PagingObject(TypedDict):
-#     href: str
-#     items: list
-#     limit: int
-#     offset: int
-#     next: Optional[str]
-#     previous: Optional[str]
-#     total: int
-
 logger = logging.getLogger(__name__)
 
 
+# We use this in SpotifySession.get() in the @retry decorator
 def _wait_retry_after(retry_state: RetryCallState) -> float:
     http_status_error: httpx.HTTPStatusError = retry_state.outcome.exception()
     r: httpx.Response = http_status_error.response
@@ -147,25 +131,23 @@ class SpotifySession(AsyncOAuth2Client):
             for audio_features in audio_features_list:
                 await tx_audio_features.send(audio_features)
 
-    async def get_followed_artists(
-        self, tx_artist: MemoryObjectSendStream, *, limit: int, after: str
-    ):
+    async def get_followed_artists(self, *, limit: int, after: str) -> list[dict]:
         if limit > 50 or limit < 1:
             raise ValueError(
                 f"The Get Followed Artists endpoint only accepts a limit between 1 and 50! (attempted limit={limit})"
             )
 
-        r = await self.get(
-            "/v1/me/following",
-            params={"type": "artist", "after": after, "limit": limit},
-        )
+        params = {"type": "artist", "limit": limit}
+
+        if after is not None:
+            params["after"] = after
+
+        r = await self.get("/v1/me/following", params=params)
 
         cursor_paging_object = r.json()
-        followed_artists: list = cursor_paging_object["artists"]["items"]
+        followed_artists: list[dict] = cursor_paging_object["artists"]["items"]
 
-        async with tx_artist:
-            for artist in followed_artists:
-                await tx_artist.send(artist)
+        return followed_artists
 
     async def get_saved_albums(
         self, tx_saved_album: MemoryObjectSendStream, *, limit: int, offset: int
@@ -225,172 +207,3 @@ class SpotifySession(AsyncOAuth2Client):
         async with tx_saved_track:
             for saved_track in saved_tracks:
                 await tx_saved_track.send(saved_track)
-
-
-# https://realpython.com/async-io-python/#other-features-async-for-and-async-generators-comprehensions
-async def batcher(
-    rx_in: MemoryObjectReceiveStream,
-    tx_out: MemoryObjectSendStream,
-    batch_coro: Callable[[MemoryObjectSendStream, list], Coroutine],
-    *,
-    batch_size: int,
-):
-    """
-    Takes an input stream, `rx_in`, and splits it up into batches of size `batch_size`,
-    then the batches are processed using `batch_coro` and the processed items are sent
-    using the `tx_out` stream.
-
-    For each batch, `batch_coro` is spawned, and it takes the batch and a send stream as
-    arguments. `batch_coro` is expected to process the batch, and then send back the
-    processed items induvidually using the send stream. These processed items are then
-    recieved by the batcher and finally sent back to the caller.
-    """
-    # TODO: a buffer_size parameter
-    tx_item, rx_item = create_memory_object_stream()
-
-    async with create_task_group() as tg:
-        async with tx_item:
-            stream_ended = False
-
-            while True:
-                batch = list()
-
-                while len(batch) < batch_size:
-                    try:
-                        item = await rx_in.receive()
-                        batch.append(item)
-                    except anyio.EndOfStream:
-                        stream_ended = True
-                        break
-
-                if len(batch) > 0:
-                    # Each batch corountine will use tx_item and then close it
-                    await tg.spawn(batch_coro, tx_item.clone(), batch)
-
-                if stream_ended:
-                    break
-
-        # The original tx_item is closed here so rx_item doesn't unblock until
-        # all the tx_item clones in the child tasks are closed
-
-        # tx_item.send() blocks until rx_item recieves from it, so if this for loop was
-        # outside the task group, the task group would never finish - deadlock!
-        async with tx_out:
-            async for item in rx_item:
-                await tx_out.send(item)
-
-
-async def main():
-    # https://developer.spotify.com/documentation/general/guides/scopes/
-    SCOPE = [
-        "user-library-read",
-        "user-follow-read",
-        # "user-top-read",
-        # "user-read-recently-played",
-        # "playlist-read-private",
-        # "playlist-read-collaborative",
-    ]
-
-    CLIENT_ID = os.getenv("CLIENT_ID")
-    CLIENT_SECRET = os.getenv("CLIENT_SECRET")
-    REDIRECT_URI = os.getenv("REDIRECT_URI")
-
-    async with SpotifySession(
-        CLIENT_ID, CLIENT_SECRET, scope=SCOPE, redirect_uri=REDIRECT_URI
-    ) as spotify:
-        await spotify.authorize_spotify()
-
-        r = await spotify.get(
-            "/v1/me/tracks", params={"limit": 1, "market": "from_token"}
-        )
-        paging_object = r.json()
-
-        # The 'Get Saved Tracks' endpoint returns pages with a max size of 50 tracks
-        PAGE_SIZE = 50
-
-        # The total no. of tracks in the user's library
-        total_tracks = paging_object["total"]
-        # How many requests it will take to get all the tracks from the API
-        total_pages = ceil(total_tracks / PAGE_SIZE)
-
-        logger.info(f"Fetching {total_tracks} tracks...")
-
-        # TODO: When we eventually replace this with a stream, we'll still need to use
-        # a set to make sure we aren't requesting the same artist twice.
-        artist_ids: set[str] = set()
-
-        tx_saved_track, rx_saved_track = create_memory_object_stream()
-
-        async with create_task_group() as tg:
-            async with tx_saved_track:
-                for page in range(total_pages):
-                    await tg.spawn(
-                        partial(
-                            spotify.get_saved_tracks,
-                            tx_saved_track.clone(),
-                            limit=PAGE_SIZE,
-                            offset=page * PAGE_SIZE,
-                        )
-                    )
-
-            async for saved_track in rx_saved_track:
-                track = saved_track["track"]
-                for artist in track["artists"]:
-                    artist_ids.add(artist["id"])
-
-        logger.info(f"Fetching {len(artist_ids)} artists...")
-
-        tx_artist_id, rx_artist_id = create_memory_object_stream()
-        tx_artist, rx_artist = create_memory_object_stream()
-
-        async with create_task_group() as tg:
-            async with tx_artist:
-                await tg.spawn(
-                    partial(
-                        batcher,
-                        rx_artist_id,
-                        tx_artist.clone(),
-                        lambda tx, b: spotify.get_multiple_artists(tx, ids=b),
-                        batch_size=PAGE_SIZE,
-                    )
-                )
-
-                async with tx_artist_id:
-                    for artist_id in artist_ids:
-                        await tx_artist_id.send(artist_id)
-
-            artists_unsorted = [(a["name"], a["popularity"]) async for a in rx_artist]
-            artists = sorted(artists_unsorted, key=lambda a: a[1], reverse=True)
-
-            for i in range(100):
-                (name, popularity) = artists[i]
-                print(f"{name} ({popularity})")
-
-
-if __name__ == "__main__":
-    # https://github.com/encode/httpx/issues/914
-    import sys
-
-    if (
-        sys.version_info[0] == 3
-        and sys.version_info[1] >= 8
-        and sys.platform.startswith("win")
-    ):
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
-    from dotenv import load_dotenv
-
-    # https://docs.python.org/3/howto/logging.html
-    logging.basicConfig(
-        format="%(levelname)s [%(asctime)s] %(name)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-    logging.getLogger(__name__).setLevel(logging.DEBUG)
-
-    try:
-        load_dotenv()
-        asyncio.run(main())
-        logger.info("Finished!")
-    except KeyboardInterrupt:
-        logger.exception("Keyboard Interrupt!")
