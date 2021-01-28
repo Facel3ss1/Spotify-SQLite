@@ -72,7 +72,7 @@ class SpotifySession(AsyncOAuth2Client):
             lambda e: e.response.status_code == 429 or e.response.status_code == 503
         ),
         stop=stop_after_attempt(5),
-        wait=_wait_retry_after + wait_random(0, 2),
+        wait=_wait_retry_after + wait_random(0, 1),
     )
     async def get(self, url: str, **kwargs):
         # https://github.com/requests/toolbelt/blob/7c4f92bb81204d82ef01fb0f0ab6dba6c7afc075/requests_toolbelt/sessions.py

@@ -16,6 +16,7 @@ python-dotenv = "*"
 anyio = "*"
 tenacity = "*"
 python-dateutil = "*"
+tqdm = "*"
 
 [requires]
 python_version = "3.9"

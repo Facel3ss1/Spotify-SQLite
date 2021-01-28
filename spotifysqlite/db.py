@@ -725,3 +725,11 @@ def create_engine(db_file: str, **kwargs) -> Engine:
     engine = sqlalchemy.create_engine(f"sqlite:///{db_file}", **kwargs)
     Base.metadata.create_all(engine)
     return engine
+
+
+def reset_database(engine: Engine):
+    """
+    Drops all the tables from an engine and creates them again
+    """
+    Base.metadata.drop_all(engine)
+    Base.metadata.create_all(engine)

@@ -11,6 +11,7 @@ from anyio import create_memory_object_stream, create_task_group
 from anyio.streams.memory import MemoryObjectSendStream
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
+from tqdm.asyncio import tqdm
 
 import spotifysqlite.api as api
 import spotifysqlite.db as db
@@ -19,6 +20,7 @@ logger = logging.getLogger("spotifysqlite")
 logger.setLevel(logging.DEBUG)
 
 # TODO: https://github.com/tqdm/tqdm
+# TODO: https://typer.tiangolo.com/
 # TODO: Syncing algorithm
 # TODO: Playlist support?
 
@@ -168,7 +170,15 @@ class SpotifyDownloader:
                         )
                     )
 
-            return [TrackResponse(t, True) async for t in rx_saved_track]
+            return [
+                TrackResponse(t, True)
+                async for t in tqdm(
+                    rx_saved_track,
+                    desc="Fetching Saved Tracks",
+                    total=total_tracks,
+                    unit="track",
+                )
+            ]
 
     async def fetch_saved_albums(self) -> list[AlbumResponse]:
         PAGE_SIZE = 50
@@ -196,7 +206,15 @@ class SpotifyDownloader:
                         )
                     )
 
-            return [AlbumResponse(a, True) async for a in rx_saved_album]
+            return [
+                AlbumResponse(a, True)
+                async for a in tqdm(
+                    rx_saved_album,
+                    desc="Fetching Saved Albums",
+                    total=total_albums,
+                    unit="album",
+                )
+            ]
 
     async def fetch_followed_artists(self) -> list[ArtistResponse]:
         PAGE_SIZE = 50
@@ -211,10 +229,17 @@ class SpotifyDownloader:
         artists: list[ArtistResponse] = list()
         after: str = None
 
-        while len(artists) < total_artists:
-            page = await self.spotify.get_followed_artists(limit=PAGE_SIZE, after=after)
-            artists.extend(map(lambda a: ArtistResponse(a, True), page))
-            after = artists[-1].id
+        with tqdm(
+            desc="Fetching Followed Artists", total=total_artists, unit="artist"
+        ) as pbar:
+            while len(artists) < total_artists:
+                page = await self.spotify.get_followed_artists(
+                    limit=PAGE_SIZE, after=after
+                )
+                artists.extend(map(lambda a: ArtistResponse(a, True), page))
+                after = artists[-1].id
+
+                pbar.update(len(page))
 
         return artists
 
@@ -264,7 +289,12 @@ class SpotifyDownloader:
                     )
                 )
 
-            return [AlbumResponse(a, False) async for a in rx_album]
+            return [
+                AlbumResponse(a, False)
+                async for a in tqdm(
+                    rx_album, desc="Fetching Albums", total=len(ids), unit="album"
+                )
+            ]
 
     async def fetch_multiple_artists(self, ids: set[str]) -> list[ArtistResponse]:
         PAGE_SIZE = 50
@@ -283,7 +313,12 @@ class SpotifyDownloader:
                     )
                 )
 
-            return [ArtistResponse(a, False) async for a in rx_artist]
+            return [
+                ArtistResponse(a, False)
+                async for a in tqdm(
+                    rx_artist, desc="Fetching Artists", total=len(ids), unit="artist"
+                )
+            ]
 
     async def fetch_multiple_audio_features(
         self, ids: set[str]
@@ -307,7 +342,13 @@ class SpotifyDownloader:
                 )
 
             return {
-                a["id"]: db.AudioFeatures.from_json(a) async for a in rx_audio_features
+                a["id"]: db.AudioFeatures.from_json(a)
+                async for a in tqdm(
+                    rx_audio_features,
+                    desc="Fetching Audio Features",
+                    total=len(ids),
+                    unit="af",
+                )
             }
 
     @staticmethod
@@ -332,9 +373,9 @@ class SpotifyDownloader:
         return albums
 
 
-async def main():
+async def download_library(dl: SpotifyDownloader, filename: str):
     """
-    `main` will authorise the user with Spotify and then fetch every track from their
+    `full_download` will authorise the user with Spotify and then fetch every track from their
     library. For each track in their library it will add these records to the database:
     - The `SavedTrack`
     - The track's `Album`
@@ -344,29 +385,11 @@ async def main():
         - Including the `Artist`'s `Genre`s
     - The `AudioFeatures` for that track
 
-    `main` does this and ensures that there will be no duplicate records in the database.
+    Note that this deletes whatever was in the database beforehand.
     """
 
-    CLIENT_ID = os.getenv("CLIENT_ID")
-    CLIENT_SECRET = os.getenv("CLIENT_SECRET")
-    REDIRECT_URI = os.getenv("REDIRECT_URI")
-
-    if CLIENT_ID is None:
-        raise Exception("CLIENT_ID not found in environment")
-
-    if CLIENT_SECRET is None:
-        raise Exception("CLIENT_SECRET not found in environment")
-
-    if REDIRECT_URI is None:
-        raise Exception("REDIRECT_URI not found in environment")
-
-    async with SpotifyDownloader(
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
-        redirect_uri=REDIRECT_URI,
-    ) as dl:
+    async with dl:
         # 1. Fetch the users library
-        print("Fetching Library...")
         saved_tracks = await dl.fetch_saved_tracks()
         saved_albums = await dl.fetch_saved_albums()
         followed_artists = await dl.fetch_followed_artists()
@@ -377,7 +400,6 @@ async def main():
         required_albums: set[str] = dl.all_required_albums(
             tracks_list
         ) - Response.set_of_ids(saved_albums)
-        print(f"Fetching {len(required_albums)} Albums...")
         fetched_albums = await dl.fetch_multiple_albums(required_albums)
         albums_list = saved_albums + fetched_albums
 
@@ -385,7 +407,6 @@ async def main():
         required_artists: set[str] = (
             dl.all_required_artists(tracks_list) | dl.all_required_artists(albums_list)
         ) - Response.set_of_ids(followed_artists)
-        print(f"Fetching {len(required_artists)} Artists...")
         fetched_artists = await dl.fetch_multiple_artists(required_artists)
         artists_list = followed_artists + fetched_artists
 
@@ -394,29 +415,17 @@ async def main():
         artists: dict[str, ArtistResponse] = {a.id: a for a in artists_list}
 
         # TODO: Fetching the audio features can be done in parallel
-        print(f"Fetching {len(tracks_list)} Audio Features...")
         audio_features = await dl.fetch_multiple_audio_features(
             Response.set_of_ids(tracks_list)
         )
 
         print("Setting up Database...")
 
-        filename = "test.db"
-
-        while os.path.exists(filename):
-            try:
-                os.remove(filename)
-                break
-            except PermissionError:
-                input(
-                    f"{filename} is open in another program! Close it and press enter... "
-                )
-                continue
-
         engine = db.create_engine(filename)
-        session = Session(engine)
+        # Delete anything that was there before
+        db.reset_database(engine)
 
-        print("Adding Library to database..")
+        session = Session(engine)
 
         # 4. Add artists to the albums
         for album in albums.values():
@@ -427,7 +436,9 @@ async def main():
             )
 
         # 5. Add albums, artists, and audio features to the tracks, and add the tracks to the session
-        for track in tracks.values():
+        for track in tqdm(
+            tracks.values(), desc="Adding Tracks to Database", unit="track"
+        ):
             track_db = track.to_db_object()
 
             track_db.album = albums[track.required_album()].to_db_object()
@@ -442,6 +453,31 @@ async def main():
 
         print("Saving Database...")
         session.commit()
+
+
+async def main():
+    CLIENT_ID = os.getenv("CLIENT_ID")
+    CLIENT_SECRET = os.getenv("CLIENT_SECRET")
+    REDIRECT_URI = os.getenv("REDIRECT_URI")
+
+    if CLIENT_ID is None:
+        raise Exception("CLIENT_ID not found in environment")
+
+    if CLIENT_SECRET is None:
+        raise Exception("CLIENT_SECRET not found in environment")
+
+    if REDIRECT_URI is None:
+        raise Exception("REDIRECT_URI not found in environment")
+
+    dl = SpotifyDownloader(
+        client_id=CLIENT_ID,
+        client_secret=CLIENT_SECRET,
+        redirect_uri=REDIRECT_URI,
+    )
+
+    filename = "test.db"
+
+    await download_library(dl, filename)
 
 
 if __name__ == "__main__":
