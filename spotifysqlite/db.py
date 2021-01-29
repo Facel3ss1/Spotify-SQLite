@@ -35,16 +35,6 @@ from sqlalchemy.ext.declarative import (
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.ext.orderinglist import ordering_list
 from sqlalchemy.orm import Session, object_session, relationship, validates
-from sqlalchemy.orm.attributes import get_history
-
-# https://docs.sqlalchemy.org/en/13/orm/tutorial.html#
-# https://docs.sqlalchemy.org/en/13/orm/extensions/declarative/relationships.html
-
-# TODO: Views?
-# TODO: Sorting Artists with 'The' taken into account?
-# TODO: https://click.palletsprojects.com/en/7.x/
-# TODO: https://docs.python-guide.org/writing/structure/
-# TODO: https://blog.jupyter.org/a-jupyter-kernel-for-sqlite-9549c5dcf551
 
 
 @as_declarative()
@@ -57,13 +47,12 @@ class Base:
     """
 
     # @declared_attr makes it a class property, so the first argument is the class, not self
-    # https://stackoverflow.com/questions/1175208/elegant-python-function-to-convert-camelcase-to-snake-case
     @declared_attr
     def __tablename__(cls):
+        # https://stackoverflow.com/questions/1175208/elegant-python-function-to-convert-camelcase-to-snake-case
         name = re.sub("(.)([A-Z][a-z]+)", r"\1_\2", cls.__name__)
         return re.sub("([a-z0-9])([A-Z])", r"\1_\2", name).lower()
 
-    # https://stackoverflow.com/questions/2441796/how-to-discover-table-properties-from-sqlalchemy-mapped-object/2448930#2448930
     def __repr__(self):
         columns = self.__mapper__.columns
 
@@ -81,7 +70,7 @@ class Base:
             return super().__repr__()
 
 
-# Based on https://developer.spotify.com/documentation/web-api/reference-beta/#objects-index
+# Based on https://developer.spotify.com/documentation/web-api/reference/#objects-index
 
 # https://docs.sqlalchemy.org/en/13/orm/extensions/declarative/mixins.html
 class SpotifyResource:
@@ -158,64 +147,6 @@ class SpotifyResource:
             return {"polymorphic_identity": False, "polymorphic_on": cls.is_saved}
 
 
-# TODO: Don't delete saved stuff in the orphan checks
-# http://witkowskibartosz.com/blog/python_decorators_vs_inheritance.html
-def auto_delete_orphans(*attr_keys):
-    """
-    Class decorator that will register orphan listeners on the attributes in
-    ``attr_keys``.
-
-    The orphan listeners will automatically delete orphaned objects from the attributes
-    when an instance of the class is deleted.
-
-    This is meant for many-to-many relationships, which can't have cascade rules.
-    """
-
-    def decorate(cls):
-        # Based on https://sqlalchemy-utils.readthedocs.io/en/latest/_modules/sqlalchemy_utils/listeners.html#auto_delete_orphans
-        @event.listens_for(cls, "attribute_instrument", propagate=True)
-        def register_listener(_parent_class, _key, attr):
-            # The parent_class is the class we've just deleted
-            parent_class = attr.parent.class_
-            key = attr.key
-            # We only want to register the orphan listener on base classes
-            if key in attr_keys and not has_inherited_table(parent_class):
-                # The target_class is what we will try to delete orphans from
-                target_class = attr.property.mapper.class_
-                back_populates = attr.property.back_populates
-
-                if not back_populates:
-                    raise AttributeError(
-                        f"The attribute {cls.__name__}.{key} given for auto_delete_orphans needs to have back_populates set."
-                    )
-                if isinstance(back_populates, tuple):
-                    back_populates = back_populates[0]
-
-                @event.listens_for(Session, "after_flush")
-                def delete_orphan_listener(session: Session, ctx):
-                    # Check in the session if we've deleted anything that would leave behind orphans
-                    orphans_found = any(
-                        isinstance(obj, parent_class) and get_history(obj, key).deleted
-                        for obj in session.dirty
-                    ) or any(isinstance(obj, parent_class) for obj in session.deleted)
-
-                    if orphans_found:
-                        # Emit a DELETE for all orphans that aren't saved
-                        session.query(target_class).filter(
-                            ~getattr(target_class, back_populates).any()
-                        ).delete(synchronize_session=False)
-
-        @event.listens_for(cls, "class_instrument", propagate=True)
-        def recieve_class_instrument(inst_cls):
-            if not has_inherited_table(inst_cls):
-                # mapper = inspect(inst_cls)
-                pass
-
-        return cls
-
-    return decorate
-
-
 album_artist = Table(
     "album_artist",
     Base.metadata,
@@ -233,8 +164,7 @@ album_artist = Table(
 
 
 # https://docs.sqlalchemy.org/en/13/orm/basic_relationships.html#association-pattern
-# We have to use a class instead of a secondary table
-# because artist_order is an additional column
+# We have to use a class instead of a secondary table because artist_order is an additional column
 class TrackArtist(Base):
     track_id: str = Column(
         ForeignKey("track.id"),
@@ -258,11 +188,9 @@ class TrackArtist(Base):
         return track_artist
 
 
-# TODO: Index for name?
 class Genre(Base):
     id: int = Column(Integer, primary_key=True)
     name: str = Column(Text(collation="nocase"), nullable=False, unique=True)
-    # TODO: Add 'Sound of __' playlists?
 
     # https://github.com/sqlalchemy/sqlalchemy/wiki/UniqueObject
     @classmethod
@@ -298,7 +226,6 @@ class Genre(Base):
 
 # https://github.com/sqlalchemy/sqlalchemy/wiki/UniqueObjectValidatedOnPending
 # See also https://docs.sqlalchemy.org/en/13/orm/extensions/declarative/mixins.html#mixing-in-association-proxy-and-other-attributes
-# @auto_delete_orphans("_genres")
 class HasGenres:
     """
     Define a class that can have many genres.
@@ -340,7 +267,7 @@ class HasGenres:
         return association_proxy("_genres", "name")
 
     @validates("_genres")
-    def _validate_genre(self, key, genre):
+    def _validate_genre(self, _, genre):
         """
         Receive the event that occurs when someobject._genres is appended to.
 
@@ -395,7 +322,7 @@ class Album(SpotifyResource, HasGenres, Base):
 
     album_type: Type = Column(Enum(Type), nullable=False)
     # Spotify doesnt always add the day or month to the release date:
-    # https://developer.spotify.com/documentation/web-api/reference-beta/#object-albumobject
+    # https://developer.spotify.com/documentation/web-api/reference/#object-albumobject
     # So we have to store the month and day as 01 or something if release_date_precision isn't DAY
     release_date: datetime.date = Column(Date, nullable=False)
 
@@ -461,7 +388,6 @@ class Track(SpotifyResource, Base):
         Integer, CheckConstraint("duration_ms > 0"), nullable=False
     )
     album_id: str = Column(ForeignKey("album.id"), nullable=False)
-    # TODO: More robust checking of validity of disc and track numbers
     disc_number: int = Column(
         Integer, CheckConstraint("disc_number > 0"), nullable=False, default=1
     )
@@ -486,7 +412,7 @@ class Track(SpotifyResource, Base):
         cascade="all, delete-orphan",
     )
 
-    # Adding a Artist() to artists will create a new TrackArtist() with its artist set
+    # Adding a Artist() to this will create a new TrackArtist() with its .artist set
     # https://docs.sqlalchemy.org/en/13/orm/extensions/associationproxy.html#simplifying-association-objects
     artists: list[Artist] = association_proxy(
         "track_artists",
@@ -511,7 +437,6 @@ class Track(SpotifyResource, Base):
 
 class AudioFeatures(Base):
     track_id: str = Column(ForeignKey("track.id"), primary_key=True)
-    # https://docs.microsoft.com/en-us/sql/t-sql/data-types/precision-scale-and-length-transact-sql?view=sql-server-ver15
     acousticness: float = Column(
         Float,
         CheckConstraint("acousticness BETWEEN 0 AND 1"),
@@ -595,11 +520,7 @@ class AudioFeatures(Base):
 # This means you can access columns from their parent tables and SQLAlchemy
 # does the rest with joins under the hood.
 
-
-# TODO: With that being said, single table inheritance might be better for this?
 # TODO: Generalise from_unsaved methods into SpotifyResource?
-# See also https://groups.google.com/g/sqlalchemy/c/F42nv5yA9rw?pli=1
-# See also https://github.com/zzzeek/test_sqlalchemy/issues/648
 class FollowedArtist(Artist):
     @classmethod
     def from_artist(cls, artist: Artist):
@@ -619,8 +540,8 @@ class FollowedArtist(Artist):
         return cls.from_artist(artist)
 
 
-# Note that the enums from Album are the same for SavedAlbum afaik
-# type(Album.ReleaseDatePrecision) is type(SavedAlbum.ReleaseDatePrecision)
+# Note that the enums from Album are the same for SavedAlbum AFAIK
+# i.e. type(Album.ReleaseDatePrecision) is type(SavedAlbum.ReleaseDatePrecision)
 class SavedAlbum(Album):
     added_at: datetime.datetime = Column(DateTime, nullable=False)
 
@@ -652,9 +573,6 @@ class SavedTrack(Track):
 
     @classmethod
     def from_track(cls, track: Track, added_at: datetime.datetime) -> SavedTrack:
-        # TODO: Use object_session to delete original track
-        # Or use session.merge with SpotifyResources
-
         saved_track = cls(
             id=track.id,
             name=track.name,
@@ -693,7 +611,6 @@ def validate_genre(session: Session, object_: HasGenres):
     if isinstance(object_, HasGenres) and object_._genres is not None:
         for index, genre in enumerate(object_._genres):
             if genre.id is None:
-                # TODO: Genres with the same name are not being expunged?
                 # Make sure it's not going to be persisted before we check it
                 if genre in session:
                     session.expunge(genre)
@@ -714,7 +631,6 @@ def create_engine(db_file: str, **kwargs) -> Engine:
         if not isinstance(dbapi_connection, sqlite3.Connection):
             return
 
-        # https://gist.github.com/eestrada/fd55398950c6ee1f1deb
         dbapi_connection.create_function(
             "regexp", 2, lambda x, y: 1 if re.search(x, y) else 0
         )
@@ -729,7 +645,7 @@ def create_engine(db_file: str, **kwargs) -> Engine:
 
 def reset_database(engine: Engine):
     """
-    Drops all the tables from an engine and creates them again
+    Drops all the tables from an engine and creates them again.
     """
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)

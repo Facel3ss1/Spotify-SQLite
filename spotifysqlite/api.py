@@ -50,8 +50,7 @@ class SpotifySession(AsyncOAuth2Client):
             show_dialog="true" if show_dialog else "false",
         )
 
-        # TODO: This is really annoying please make it stop HTTP server pls
-        # Or we could save the previous token
+        # TODO: We could save the previous token
         print(f"Opening {authorization_url} in web browser...")
 
         if open_browser:
@@ -63,8 +62,6 @@ class SpotifySession(AsyncOAuth2Client):
             self.TOKEN_URL, authorization_response=authorization_response
         )
 
-        # print(f"Token: {token}")
-
     # https://tenacity.readthedocs.io/en/latest/index.html
     # https://developer.spotify.com/documentation/web-api/#rate-limiting
     @retry(
@@ -75,7 +72,6 @@ class SpotifySession(AsyncOAuth2Client):
         wait=_wait_retry_after + wait_random(0, 1),
     )
     async def get(self, url: str, **kwargs):
-        # https://github.com/requests/toolbelt/blob/7c4f92bb81204d82ef01fb0f0ab6dba6c7afc075/requests_toolbelt/sessions.py
         r = await super().get(urljoin(self.API_BASE_URL, url), **kwargs)
 
         r.raise_for_status()

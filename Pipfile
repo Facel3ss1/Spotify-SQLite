@@ -9,7 +9,6 @@ rope = "*"
 
 [packages]
 authlib = "*"
-# httpx = "==0.14.1"
 httpx = "==0.16.*"
 sqlalchemy = "*"
 python-dotenv = "*"
