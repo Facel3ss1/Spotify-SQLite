@@ -20,7 +20,7 @@ import spotifysqlite.db as db
 logger = logging.getLogger("spotifysqlite")
 logger.setLevel(logging.DEBUG)
 
-# TODO: Make tqdm ascii
+
 # TODO: https://typer.tiangolo.com/
 # TODO: Syncing algorithm
 # TODO: Playlist support?
@@ -181,6 +181,7 @@ class SpotifyDownloader:
                 TrackResponse(t, True)
                 async for t in tqdm(
                     rx_saved_track,
+                    ascii=True,
                     desc="Fetching Saved Tracks",
                     total=total_tracks,
                     unit="track",
@@ -217,6 +218,7 @@ class SpotifyDownloader:
                 AlbumResponse(a, True)
                 async for a in tqdm(
                     rx_saved_album,
+                    ascii=True,
                     desc="Fetching Saved Albums",
                     total=total_albums,
                     unit="album",
@@ -237,7 +239,10 @@ class SpotifyDownloader:
         after: str = None
 
         with tqdm(
-            desc="Fetching Followed Artists", total=total_artists, unit="artist"
+            desc="Fetching Followed Artists",
+            ascii=True,
+            total=total_artists,
+            unit="artist",
         ) as pbar:
             while len(artists) < total_artists:
                 page = await self.spotify.get_followed_artists(
@@ -299,7 +304,11 @@ class SpotifyDownloader:
             return [
                 AlbumResponse(a, False)
                 async for a in tqdm(
-                    rx_album, desc="Fetching Albums", total=len(ids), unit="album"
+                    rx_album,
+                    ascii=True,
+                    desc="Fetching Albums",
+                    total=len(ids),
+                    unit="album",
                 )
             ]
 
@@ -323,7 +332,11 @@ class SpotifyDownloader:
             return [
                 ArtistResponse(a, False)
                 async for a in tqdm(
-                    rx_artist, desc="Fetching Artists", total=len(ids), unit="artist"
+                    rx_artist,
+                    ascii=True,
+                    desc="Fetching Artists",
+                    total=len(ids),
+                    unit="artist",
                 )
             ]
 
@@ -352,6 +365,7 @@ class SpotifyDownloader:
                 a["id"]: db.AudioFeatures.from_json(a)
                 async for a in tqdm(
                     rx_audio_features,
+                    ascii=True,
                     desc="Fetching Audio Features",
                     total=len(ids),
                     unit="af",
@@ -489,7 +503,10 @@ class Program:
 
         # Add albums, artists, and audio features to the tracks, and add the tracks to the session
         for track in tqdm(
-            self.tracks.values(), desc="Adding Tracks to Database", unit="track"
+            self.tracks.values(),
+            ascii=True,
+            desc="Adding Tracks to Database",
+            unit="track",
         ):
             track_db = track.to_db_object()
 
