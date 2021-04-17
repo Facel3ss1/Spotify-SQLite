@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 import os
 from functools import cache, partial
@@ -9,7 +10,10 @@ from typing import Callable, Coroutine, Union
 
 from anyio import create_memory_object_stream, create_task_group
 from anyio.streams.memory import MemoryObjectSendStream
+from dateutil.parser import isoparse
 from dotenv import load_dotenv
+from sqlalchemy import text
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from tqdm.asyncio import tqdm
 
@@ -19,7 +23,7 @@ import spotifysqlite.db as db
 logger = logging.getLogger("spotifysqlite")
 logger.setLevel(logging.DEBUG)
 
-# TODO: https://github.com/tqdm/tqdm
+# TODO: Make tqdm ascii
 # TODO: https://typer.tiangolo.com/
 # TODO: Syncing algorithm
 # TODO: Playlist support?
@@ -123,6 +127,7 @@ class SpotifyDownloader:
     ]
 
     spotify: api.SpotifySession
+    is_authorized: bool
 
     def __init__(
         self, *, client_id: str, client_secret: str, redirect_uri: str
@@ -134,8 +139,13 @@ class SpotifyDownloader:
             redirect_uri=redirect_uri,
         )
 
+        self.is_authorized = False
+
     async def __aenter__(self):
-        await self.spotify.authorize_spotify()
+        if not self.is_authorized:
+            await self.spotify.authorize_spotify()
+            self.is_authorized = True
+
         await self.spotify.__aenter__()
         return self
 
@@ -351,6 +361,45 @@ class SpotifyDownloader:
                 )
             }
 
+    async def fetch_saved_tracks_newer_than(
+        self, timestamp: datetime.datetime
+    ) -> list[TrackResponse]:
+        PAGE_SIZE = 50
+
+        r = await self.spotify.get(
+            "/v1/me/tracks", params={"limit": 1, "market": "from_token"}
+        )
+
+        paging_object = r.json()
+        total_tracks = paging_object["total"]
+        total_pages = ceil(total_tracks / PAGE_SIZE)
+
+        saved_tracks = list()
+
+        for page in range(total_pages):
+            r = await self.spotify.get(
+                "/v1/me/tracks",
+                params={
+                    "limit": PAGE_SIZE,
+                    "offset": page * PAGE_SIZE,
+                    "market": "from_token",
+                },
+            )
+
+            json = r.json()
+            tracks = json["items"]
+
+            for track in tracks:
+                # Remove the Z so isoparse doesn't add a timezone (all Spotify timestamps are UTC)
+                added_at = isoparse(track["added_at"].removesuffix("Z"))
+
+                if added_at > timestamp:
+                    saved_tracks.append(TrackResponse(track, True))
+                else:
+                    return saved_tracks
+
+        return saved_tracks
+
     @staticmethod
     def all_required_artists(
         responses: Union[list[TrackResponse], list[AlbumResponse]]
@@ -373,111 +422,184 @@ class SpotifyDownloader:
         return albums
 
 
-async def download_library(dl: SpotifyDownloader, filename: str):
-    """
-    `full_download` will authorise the user with Spotify and then fetch every track from their
-    library. For each track in their library it will add these records to the database:
-    - The `SavedTrack`
-    - The track's `Album`
-        - This includes the `Artist`s (and their respective `Genre`s) for that `Album`
-        - The `Album` also has `Genre`s
-    - The track's `Artist`s
-        - Including the `Artist`'s `Genre`s
-    - The `AudioFeatures` for that track
+class Program:
+    dl: SpotifyDownloader
+    engine: Engine
 
-    Note that this deletes whatever was in the database beforehand.
-    """
+    tracks: dict[str, TrackResponse]
+    albums: dict[str, AlbumResponse]
+    artists: dict[str, ArtistResponse]
+    audio_features: dict[str, db.AudioFeatures]
 
-    async with dl:
-        # 1. Fetch the users library
-        saved_tracks = await dl.fetch_saved_tracks()
-        saved_albums = await dl.fetch_saved_albums()
-        followed_artists = await dl.fetch_followed_artists()
+    def __init__(self, filename: str) -> None:
+        CLIENT_ID = os.getenv("CLIENT_ID")
+        CLIENT_SECRET = os.getenv("CLIENT_SECRET")
+        REDIRECT_URI = os.getenv("REDIRECT_URI")
 
-        tracks_list = saved_tracks
+        if CLIENT_ID is None:
+            raise Exception("CLIENT_ID not found in environment")
 
-        # 2. Fetch the required albums from the saved tracks
-        required_albums: set[str] = dl.all_required_albums(
-            tracks_list
-        ) - Response.set_of_ids(saved_albums)
-        fetched_albums = await dl.fetch_multiple_albums(required_albums)
-        albums_list = saved_albums + fetched_albums
+        if CLIENT_SECRET is None:
+            raise Exception("CLIENT_SECRET not found in environment")
 
-        # 3. Fetch the required artists from the saved tracks, the saved albums, and the fetched albums
-        required_artists: set[str] = (
-            dl.all_required_artists(tracks_list) | dl.all_required_artists(albums_list)
-        ) - Response.set_of_ids(followed_artists)
-        fetched_artists = await dl.fetch_multiple_artists(required_artists)
-        artists_list = followed_artists + fetched_artists
+        if REDIRECT_URI is None:
+            raise Exception("REDIRECT_URI not found in environment")
 
-        tracks: dict[str, TrackResponse] = {t.id: t for t in tracks_list}
-        albums: dict[str, AlbumResponse] = {a.id: a for a in albums_list}
-        artists: dict[str, ArtistResponse] = {a.id: a for a in artists_list}
-
-        # TODO: Fetching the audio features can be done in parallel
-        audio_features = await dl.fetch_multiple_audio_features(
-            Response.set_of_ids(tracks_list)
+        self.dl = SpotifyDownloader(
+            client_id=CLIENT_ID,
+            client_secret=CLIENT_SECRET,
+            redirect_uri=REDIRECT_URI,
         )
+
+        self.engine = db.create_engine(filename)
+
+        self.tracks = dict()
+        self.albums = dict()
+        self.artists = dict()
+        self.audio_features = dict()
+
+    async def fetch_required(self):
+        """
+        `fetch_required` will authorise the user with Spotify and then fetch every track from their
+        library. For each track in their library it will add these records to the database:
+        - The `SavedTrack`
+        - The track's `Album`
+            - This includes the `Artist`s (and their respective `Genre`s) for that `Album`
+            - The `Album` also has `Genre`s
+        - The track's `Artist`s
+            - Including the `Artist`'s `Genre`s
+        - The `AudioFeatures` for that track
+
+        Note that this deletes whatever was in the database beforehand.
+        """
+
+        async with self.dl:
+            # Fetch the required albums from the saved tracks
+            required_albums: set[str] = (
+                self.dl.all_required_albums(self.tracks.values()) - self.albums.keys()
+            )
+            fetched_albums = await self.dl.fetch_multiple_albums(required_albums)
+            self.albums |= {a.id: a for a in fetched_albums}
+
+            # Fetch the required artists from the saved tracks, the saved albums, and the fetched albums
+            required_artists: set[str] = (
+                self.dl.all_required_artists(self.tracks.values())
+                | self.dl.all_required_artists(self.albums.values())
+            ) - self.artists.keys()
+            fetched_artists = await self.dl.fetch_multiple_artists(required_artists)
+            self.artists |= {a.id: a for a in fetched_artists}
+
+            # TODO: Fetching the audio features can be done in parallel
+            self.audio_features = await self.dl.fetch_multiple_audio_features(
+                self.tracks.keys()
+            )
+
+    async def fetch_library(self):
+        async with self.dl:
+            # Fetch the users library
+            saved_tracks = await self.dl.fetch_saved_tracks()
+            saved_albums = await self.dl.fetch_saved_albums()
+            followed_artists = await self.dl.fetch_followed_artists()
+
+            self.tracks: dict[str, TrackResponse] = {t.id: t for t in saved_tracks}
+            self.albums: dict[str, AlbumResponse] = {a.id: a for a in saved_albums}
+            self.artists: dict[str, ArtistResponse] = {
+                a.id: a for a in followed_artists
+            }
+
+        await self.fetch_required()
 
         print("Setting up Database...")
 
-        engine = db.create_engine(filename)
         # Delete anything that was there before
-        db.reset_database(engine)
+        db.reset_database(self.engine)
 
-        session = Session(engine)
+        self.save_to_db()
 
-        # 4. Add artists to the albums
-        for album in albums.values():
+    async def sync_library(self):
+        """
+        In constrast to `full_download`, `sync_library` will preserve the database
+        and instead update the database with any additions or deletions that have been
+        made to the user's Spotify library.
+
+        It does this by:
+        1. Looking at the most recently added track from the database,
+        then fetching and saving anything newer than that from Spotify.
+        2. At this point, if the number of tracks in the database is the same as
+        the number of tracks in the user's Spotify library, we stop.
+        3. Otherwise, we identify the deleted tracks and delete them from the
+        database until the number of tracks in the database and on Spotify match.
+        """
+
+        async with self.dl:
+            session = Session(self.engine)
+
+            most_recent_timestamp = isoparse(
+                session.query(db.SavedTrack.added_at)
+                .from_statement(
+                    text(
+                        "SELECT added_at FROM saved_track ORDER BY added_at DESC LIMIT 1"
+                    )
+                )
+                .scalar()
+            )
+
+            new_saved_tracks = await self.dl.fetch_saved_tracks_newer_than(
+                most_recent_timestamp
+            )
+
+            self.tracks = {t.id: t for t in new_saved_tracks}
+
+            await self.fetch_required()
+
+            self.save_to_db(merge=True)
+
+    def save_to_db(self, *, merge: bool = False):
+        session = Session(self.engine)
+
+        # Add artists to the albums
+        for album in self.albums.values():
             album_db = album.to_db_object()
 
             album_db.artists = list(
-                map(lambda a: artists[a].to_db_object(), album.required_artists())
+                map(lambda a: self.artists[a].to_db_object(), album.required_artists())
             )
 
-        # 5. Add albums, artists, and audio features to the tracks, and add the tracks to the session
+        # TODO: I forgot to save the saved albums and followed artists whoops
+
+        # Add albums, artists, and audio features to the tracks, and add the tracks to the session
         for track in tqdm(
-            tracks.values(), desc="Adding Tracks to Database", unit="track"
+            self.tracks.values(), desc="Adding Tracks to Database", unit="track"
         ):
             track_db = track.to_db_object()
 
-            track_db.album = albums[track.required_album()].to_db_object()
+            track_db.album = self.albums[track.required_album()].to_db_object()
 
             track_db.artists = list(
-                map(lambda a: artists[a].to_db_object(), track.required_artists())
+                map(lambda a: self.artists[a].to_db_object(), track.required_artists())
             )
 
-            track_db.audio_features = audio_features[track.id]
+            # TODO: If?
+            track_db.audio_features = self.audio_features[track.id]
 
-            session.add(track_db)
+            with session.no_autoflush:
+                if merge:
+                    session.merge(track_db)
+                else:
+                    session.add(track_db)
 
         print("Saving Database...")
         session.commit()
 
 
 async def main():
-    CLIENT_ID = os.getenv("CLIENT_ID")
-    CLIENT_SECRET = os.getenv("CLIENT_SECRET")
-    REDIRECT_URI = os.getenv("REDIRECT_URI")
+    # TODO: Make this the Spotify username
+    filename = "peter.db"
 
-    if CLIENT_ID is None:
-        raise Exception("CLIENT_ID not found in environment")
+    program = Program(filename)
 
-    if CLIENT_SECRET is None:
-        raise Exception("CLIENT_SECRET not found in environment")
-
-    if REDIRECT_URI is None:
-        raise Exception("REDIRECT_URI not found in environment")
-
-    dl = SpotifyDownloader(
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
-        redirect_uri=REDIRECT_URI,
-    )
-
-    filename = "test.db"
-
-    await download_library(dl, filename)
+    await program.fetch_library()
+    # await program.sync_library()
 
 
 if __name__ == "__main__":

@@ -38,7 +38,7 @@ class SpotifySession(AsyncOAuth2Client):
     API_BASE_URL = "https://api.spotify.com"
 
     async def authorize_spotify(
-        self, *, show_dialog: bool = False, open_browser: bool = True
+        self, *, show_dialog: bool = True, open_browser: bool = True
     ):
         # Authorize with the Spotify API using OAuth2
         # https://docs.authlib.org/en/stable/client/oauth2.html

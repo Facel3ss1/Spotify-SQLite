@@ -42,8 +42,8 @@ class Base:
     """
     This is the Base class for the declaritive ORM in SQLAlchemy.
 
-    The class name is converted from CamelCase to snake_case to derive ``__tablename__``
-    and ``__repr__()`` is overridden to show the columns of the mapper.
+    The class name is converted from CamelCase to snake_case to derive `__tablename__`
+    and `__repr__()` is overridden to show the columns of the mapper.
     """
 
     # @declared_attr makes it a class property, so the first argument is the class, not self
@@ -53,6 +53,7 @@ class Base:
         name = re.sub("(.)([A-Z][a-z]+)", r"\1_\2", cls.__name__)
         return re.sub("([a-z0-9])([A-Z])", r"\1_\2", name).lower()
 
+    # This converts a database object into a debugging friendly string
     def __repr__(self):
         columns = self.__mapper__.columns
 
@@ -78,7 +79,7 @@ class SpotifyResource:
     Define a class that can be identified by a Spotify ID and defines hybrid properties
     for the URI and the URLs.
 
-    Inheriting from a ``SpotifyResource`` creates the saved version of the resource.
+    Inheriting from a `SpotifyResource` creates the saved version of the resource.
     """
 
     # https://docs.sqlalchemy.org/en/13/orm/extensions/declarative/mixins.html#mixin-inheritance-columns
@@ -111,9 +112,9 @@ class SpotifyResource:
     @classmethod
     def resource_name(cls) -> str:
         """
-        The ``__tablename__`` of the resource at the top of the inheritance hierarchy.
+        The `__tablename__` of the resource at the top of the inheritance hierarchy.
 
-        e.g. This will return ``"track"`` for both ``Track`` and ``SavedTrack``
+        e.g. This will return `"track"` for both `Track` and `SavedTrack`
         """
         if has_inherited_table(cls):
             # https://stackoverflow.com/questions/2611892/how-to-get-the-parents-of-a-python-class
@@ -178,7 +179,10 @@ class TrackArtist(Base):
     artist_order: int = Column(Integer, nullable=False)
 
     track: Track = relationship("Track", back_populates="track_artists")
-    artist: Artist = relationship("Artist", back_populates="track_artists")
+    artist: Artist = relationship(
+        "Artist",
+        back_populates="track_artists",  # cascade="all, delete-orphan"
+    )
 
     @classmethod
     def from_artist(cls, artist: Artist):
@@ -194,11 +198,12 @@ class Genre(Base):
 
     # https://github.com/sqlalchemy/sqlalchemy/wiki/UniqueObject
     @classmethod
-    def as_unique(cls, session: Session, name: str):
+    def as_unique(cls, session: Session, name: str) -> Genre:
         """
-        Given a ``Session`` and the name of a genre, return the correct Genre object
+        Given a `Session` and the name of a genre, return the correct Genre object
         from the database/session.
         """
+
         cache = getattr(session, "_unique_cache", None)
         if cache is None:
             session._unique_cache = cache = dict()
@@ -258,6 +263,7 @@ class HasGenres:
             Genre,
             order_by=Genre.name,
             secondary=secondary_table,
+            cascade="all",
             backref=f"{tablename}s",
         )
 
@@ -267,16 +273,17 @@ class HasGenres:
         return association_proxy("_genres", "name")
 
     @validates("_genres")
-    def _validate_genre(self, _, genre):
+    def _validate_genre(self, _, genre: Genre):
         """
-        Receive the event that occurs when someobject._genres is appended to.
+        Receive the event that occurs when `someobject._genres` is appended to.
 
         If the object is present in a Session, then make sure it's the Genre
         object that we looked up from the database.
 
-        Otherwise, do nothing and we'll fix it in _validate_genre when the object is
+        Otherwise, do nothing and we'll fix it in `_validate_genre` when the object is
         added to a Session.
         """
+
         sess = object_session(self)
         if sess is not None:
             return Genre.as_unique(sess, genre.name)
@@ -296,7 +303,7 @@ class Artist(SpotifyResource, HasGenres, Base):
     track_artists: list[TrackArtist] = relationship(
         "TrackArtist", back_populates="artist"
     )
-    # TODO: Is this useful?
+
     tracks = association_proxy("track_artists", "track")
 
     @classmethod
@@ -341,14 +348,13 @@ class Album(SpotifyResource, HasGenres, Base):
         # https://github.com/sqlalchemy/sqlalchemy/issues/4708
         order_by="[Track.disc_number, Track.track_number]",
         back_populates="album",
-        # https://docs.sqlalchemy.org/en/13/orm/cascades.html
-        cascade="all, delete-orphan",
     )
     artists: list[Artist] = relationship(
         "Artist",
         order_by="Artist.name",
         secondary=album_artist,
         back_populates="albums",
+        cascade="all",
     )
 
     @classmethod
@@ -396,13 +402,19 @@ class Track(SpotifyResource, Base):
     )
     is_playable: bool = Column(Boolean, nullable=False, default=True)
 
-    album: Album = relationship("Album", back_populates="tracks")
+    album: Album = relationship(
+        "Album",
+        back_populates="tracks",
+        # https://docs.sqlalchemy.org/en/13/orm/cascades.html
+        cascade="all",
+    )
     # https://docs.sqlalchemy.org/en/13/orm/extensions/orderinglist.html
     track_artists: list[TrackArtist] = relationship(
         "TrackArtist",
         order_by="TrackArtist.artist_order",
         collection_class=ordering_list("artist_order"),
         back_populates="track",
+        cascade="all, delete-orphan",
     )
     # https://docs.sqlalchemy.org/en/13/orm/basic_relationships.html#one-to-one
     audio_features: AudioFeatures = relationship(
@@ -569,7 +581,7 @@ class SavedAlbum(Album):
 
 
 class SavedTrack(Track):
-    added_at: datetime.datetime = Column(DateTime, nullable=False)
+    added_at: datetime.datetime = Column(DateTime(timezone=True), nullable=False)
 
     @classmethod
     def from_track(cls, track: Track, added_at: datetime.datetime) -> SavedTrack:
@@ -599,7 +611,7 @@ class SavedTrack(Track):
 # https://github.com/sqlalchemy/sqlalchemy/wiki/UniqueObjectValidatedOnPending
 # See also https://docs.sqlalchemy.org/en/13/orm/session_events.html#session-lifecycle-events
 @event.listens_for(Session, "transient_to_pending")
-def validate_genre(session: Session, object_: HasGenres):
+def validate_genre(session: Session, obj: HasGenres):
     """
     Receive the HasGenres object when it gets attached to a Session to correct
     its Genre objects.
@@ -608,14 +620,14 @@ def validate_genre(session: Session, object_: HasGenres):
     """
 
     # We check the genres from HasGenres object so we can reassign the Genres to the correct ones
-    if isinstance(object_, HasGenres) and object_._genres is not None:
-        for index, genre in enumerate(object_._genres):
+    if isinstance(obj, HasGenres) and obj._genres is not None:
+        for index, genre in enumerate(obj._genres):
             if genre.id is None:
                 # Make sure it's not going to be persisted before we check it
                 if genre in session:
                     session.expunge(genre)
 
-                object_._genres[index] = Genre.as_unique(session, genre.name)
+                obj._genres[index] = Genre.as_unique(session, genre.name)
 
 
 def create_engine(db_file: str, **kwargs) -> Engine:
