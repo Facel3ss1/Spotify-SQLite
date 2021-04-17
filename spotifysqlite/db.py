@@ -179,10 +179,7 @@ class TrackArtist(Base):
     artist_order: int = Column(Integer, nullable=False)
 
     track: Track = relationship("Track", back_populates="track_artists")
-    artist: Artist = relationship(
-        "Artist",
-        back_populates="track_artists",  # cascade="all, delete-orphan"
-    )
+    artist: Artist = relationship("Artist", back_populates="track_artists")
 
     @classmethod
     def from_artist(cls, artist: Artist):
@@ -263,7 +260,7 @@ class HasGenres:
             Genre,
             order_by=Genre.name,
             secondary=secondary_table,
-            cascade="all",
+            # cascade="all",
             backref=f"{tablename}s",
         )
 
@@ -354,7 +351,7 @@ class Album(SpotifyResource, HasGenres, Base):
         order_by="Artist.name",
         secondary=album_artist,
         back_populates="albums",
-        cascade="all",
+        # cascade="all",
     )
 
     @classmethod
@@ -406,7 +403,7 @@ class Track(SpotifyResource, Base):
         "Album",
         back_populates="tracks",
         # https://docs.sqlalchemy.org/en/13/orm/cascades.html
-        cascade="all",
+        # cascade="all",
     )
     # https://docs.sqlalchemy.org/en/13/orm/extensions/orderinglist.html
     track_artists: list[TrackArtist] = relationship(
@@ -414,14 +411,14 @@ class Track(SpotifyResource, Base):
         order_by="TrackArtist.artist_order",
         collection_class=ordering_list("artist_order"),
         back_populates="track",
-        cascade="all, delete-orphan",
+        # cascade="all, delete-orphan",
     )
     # https://docs.sqlalchemy.org/en/13/orm/basic_relationships.html#one-to-one
     audio_features: AudioFeatures = relationship(
         "AudioFeatures",
         uselist=False,
         back_populates="track",
-        cascade="all, delete-orphan",
+        # cascade="all, delete-orphan",
     )
 
     # Adding a Artist() to this will create a new TrackArtist() with its .artist set

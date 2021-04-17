@@ -1,8 +1,9 @@
 SELECT genre.name,
+       count(track.id) AS num_tracks,
        round(100.0 * count(track.id) / (
                                            SELECT count(track.id) 
                                              FROM track
-                                       ), 2) AS track_percentage
+                                       ), 2) AS percentage_of_tracks
   FROM track
        INNER JOIN
        track_artist,
@@ -12,7 +13,7 @@ SELECT genre.name,
                 artist_genre.genre_id == genre.id
  WHERE track_artist.artist_order == 0
  GROUP BY genre.id
- ORDER BY track_percentage DESC;
+ ORDER BY num_tracks DESC;
 
 SELECT decade,
        count(decade) 

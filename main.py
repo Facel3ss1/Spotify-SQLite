@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import datetime
 import logging
 import os
 from functools import cache, partial
@@ -10,9 +9,7 @@ from typing import Callable, Coroutine, Union
 
 from anyio import create_memory_object_stream, create_task_group
 from anyio.streams.memory import MemoryObjectSendStream
-from dateutil.parser import isoparse
 from dotenv import load_dotenv
-from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from tqdm.asyncio import tqdm
@@ -361,45 +358,6 @@ class SpotifyDownloader:
                 )
             }
 
-    async def fetch_saved_tracks_newer_than(
-        self, timestamp: datetime.datetime
-    ) -> list[TrackResponse]:
-        PAGE_SIZE = 50
-
-        r = await self.spotify.get(
-            "/v1/me/tracks", params={"limit": 1, "market": "from_token"}
-        )
-
-        paging_object = r.json()
-        total_tracks = paging_object["total"]
-        total_pages = ceil(total_tracks / PAGE_SIZE)
-
-        saved_tracks = list()
-
-        for page in range(total_pages):
-            r = await self.spotify.get(
-                "/v1/me/tracks",
-                params={
-                    "limit": PAGE_SIZE,
-                    "offset": page * PAGE_SIZE,
-                    "market": "from_token",
-                },
-            )
-
-            json = r.json()
-            tracks = json["items"]
-
-            for track in tracks:
-                # Remove the Z so isoparse doesn't add a timezone (all Spotify timestamps are UTC)
-                added_at = isoparse(track["added_at"].removesuffix("Z"))
-
-                if added_at > timestamp:
-                    saved_tracks.append(TrackResponse(track, True))
-                else:
-                    return saved_tracks
-
-        return saved_tracks
-
     @staticmethod
     def all_required_artists(
         responses: Union[list[TrackResponse], list[AlbumResponse]]
@@ -458,6 +416,28 @@ class Program:
         self.artists = dict()
         self.audio_features = dict()
 
+    async def fetch_library(self):
+        async with self.dl:
+            # Fetch the user's library
+            saved_tracks = await self.dl.fetch_saved_tracks()
+            saved_albums = await self.dl.fetch_saved_albums()
+            followed_artists = await self.dl.fetch_followed_artists()
+
+            self.tracks: dict[str, TrackResponse] = {t.id: t for t in saved_tracks}
+            self.albums: dict[str, AlbumResponse] = {a.id: a for a in saved_albums}
+            self.artists: dict[str, ArtistResponse] = {
+                a.id: a for a in followed_artists
+            }
+
+        await self.fetch_required()
+
+        print("Setting up Database...")
+
+        # Delete anything that was there before
+        db.reset_database(self.engine)
+
+        self.save_to_db()
+
     async def fetch_required(self):
         """
         `fetch_required` will authorise the user with Spotify and then fetch every track from their
@@ -494,67 +474,7 @@ class Program:
                 self.tracks.keys()
             )
 
-    async def fetch_library(self):
-        async with self.dl:
-            # Fetch the users library
-            saved_tracks = await self.dl.fetch_saved_tracks()
-            saved_albums = await self.dl.fetch_saved_albums()
-            followed_artists = await self.dl.fetch_followed_artists()
-
-            self.tracks: dict[str, TrackResponse] = {t.id: t for t in saved_tracks}
-            self.albums: dict[str, AlbumResponse] = {a.id: a for a in saved_albums}
-            self.artists: dict[str, ArtistResponse] = {
-                a.id: a for a in followed_artists
-            }
-
-        await self.fetch_required()
-
-        print("Setting up Database...")
-
-        # Delete anything that was there before
-        db.reset_database(self.engine)
-
-        self.save_to_db()
-
-    async def sync_library(self):
-        """
-        In constrast to `full_download`, `sync_library` will preserve the database
-        and instead update the database with any additions or deletions that have been
-        made to the user's Spotify library.
-
-        It does this by:
-        1. Looking at the most recently added track from the database,
-        then fetching and saving anything newer than that from Spotify.
-        2. At this point, if the number of tracks in the database is the same as
-        the number of tracks in the user's Spotify library, we stop.
-        3. Otherwise, we identify the deleted tracks and delete them from the
-        database until the number of tracks in the database and on Spotify match.
-        """
-
-        async with self.dl:
-            session = Session(self.engine)
-
-            most_recent_timestamp = isoparse(
-                session.query(db.SavedTrack.added_at)
-                .from_statement(
-                    text(
-                        "SELECT added_at FROM saved_track ORDER BY added_at DESC LIMIT 1"
-                    )
-                )
-                .scalar()
-            )
-
-            new_saved_tracks = await self.dl.fetch_saved_tracks_newer_than(
-                most_recent_timestamp
-            )
-
-            self.tracks = {t.id: t for t in new_saved_tracks}
-
-            await self.fetch_required()
-
-            self.save_to_db(merge=True)
-
-    def save_to_db(self, *, merge: bool = False):
+    def save_to_db(self):
         session = Session(self.engine)
 
         # Add artists to the albums
@@ -583,10 +503,7 @@ class Program:
             track_db.audio_features = self.audio_features[track.id]
 
             with session.no_autoflush:
-                if merge:
-                    session.merge(track_db)
-                else:
-                    session.add(track_db)
+                session.add(track_db)
 
         print("Saving Database...")
         session.commit()
@@ -594,12 +511,11 @@ class Program:
 
 async def main():
     # TODO: Make this the Spotify username
-    filename = "peter.db"
+    filename = "test.db"
 
     program = Program(filename)
 
     await program.fetch_library()
-    # await program.sync_library()
 
 
 if __name__ == "__main__":
