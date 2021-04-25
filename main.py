@@ -582,6 +582,12 @@ if __name__ == "__main__":
         asyncio.run(main())
         logger.info("Finished!")
         print("Finished!")
+
+        # Check if we are running inside a PyInstaller bundle
+        # https://pyinstaller.readthedocs.io/en/stable/runtime-information.html
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+            print()
+            input("Press enter to close the program... ")
     except Exception as e:
         logger.exception("Exception occurred:")
         if e is not KeyboardInterrupt:

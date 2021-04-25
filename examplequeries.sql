@@ -1,3 +1,4 @@
+-- Most popular genres in your library
 SELECT genre.name,
        count(track.id) AS num_tracks,
        round(100.0 * count(track.id) / (
@@ -15,6 +16,7 @@ SELECT genre.name,
  GROUP BY genre.id
  ORDER BY num_tracks DESC;
 
+-- Break down tracks by decade
 SELECT decade,
        count(decade) 
   FROM (
@@ -25,6 +27,7 @@ SELECT decade,
        )
  GROUP BY decade;
 
+-- All of the rock tracks and their artists
  SELECT track.name AS track_name,
        artist.name AS artist_name,
        genre.name AS genre_name
@@ -38,4 +41,4 @@ SELECT decade,
                 artist.id = artist_genre.artist_id AND 
                 artist_genre.genre_id = genre.id
  WHERE track_artist.artist_order = 0 AND 
-       genre.name LIKE "%indie%";
+       genre.name LIKE "%rock%";

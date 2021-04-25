@@ -31,6 +31,16 @@ This will open your web browser with a prompt asking you to authorise with Spoti
 Once you've accepted, the page will redirect you to the Redirect URI with extra information in the URL.
 Note that subsequent runs will redirect you automatically since you've already authorised with Spotify.
 
-Paste the entire URL into the terminal prompt (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd> on most terminals) and the program will start to download your Spotify Library.
+Paste the entire URL into the terminal prompt and the program will start to download your Spotify Library.
 
-Once the download has finished, the metadata will be saved to an SQLite database file (currently this is called `test.db`), which can be opened in an external program such as [SQLite Studio](https://sqlitestudio.pl/).
+Once the download has finished, the metadata will be saved to an SQLite database file called `spotifysqlite.db` (this can be changed by passing the filename as a CLI argument), which can be opened in an external program such as [SQLite Studio](https://sqlitestudio.pl/), or on an online viewer such as [SQLite Online](https://sqliteonline.com).
+
+## Building the program
+
+To build this project, install the dev dependencies and then use this command:
+
+```shell
+pyinstaller --onefile main.py --name spotifysqlite
+```
+
+The output should be in a new `dist` folder.
