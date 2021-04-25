@@ -22,12 +22,12 @@ logger = logging.getLogger("spotifysqlite")
 logger.setLevel(logging.DEBUG)
 
 
-# TODO: https://typer.tiangolo.com/
-# TODO: Syncing algorithm
-# TODO: Playlist support?
-
-
 class Response:
+    """
+    This is a parent class for wrapping the JSON responses and providing an
+    interface to convert them into database objects.
+    """
+
     _json: dict
     _is_saved: bool
 
@@ -52,6 +52,8 @@ class Response:
 
 
 class TrackResponse(Response):
+    # We use @cache so repeated calls will always return the same database object.
+    # This is to ensure each database object is unique.
     @cache
     def to_db_object(self) -> Union[db.Track, db.SavedTrack]:
         if self._is_saved:
@@ -114,14 +116,16 @@ class AlbumResponse(Response):
 
 
 class SpotifyDownloader:
+    """
+    `SpotifyDownloader` is a wrapper over the `SpotifySession` that uses its methods to provide
+    fetching methods that fetch the entirety of a user's library using asynchronous programming.
+    """
+
+    # The scope dictates what permissions the program needs from the Spotify Web API.
     # https://developer.spotify.com/documentation/general/guides/scopes/
     SCOPE = [
-        "user-library-read",
-        "user-follow-read",
-        # "user-top-read",
-        # "user-read-recently-played",
-        # "playlist-read-private",
-        # "playlist-read-collaborative",
+        "user-library-read",  # Read saved tracks, saved albums, and playlists
+        "user-follow-read",  # Read followed artists
     ]
 
     spotify: api.SpotifySession
@@ -139,6 +143,7 @@ class SpotifyDownloader:
 
         self.is_authorized = False
 
+    # __aenter__ and __aexit__ allow us to use SpotifyDownloader in a `with` block
     async def __aenter__(self):
         if not self.is_authorized:
             await self.spotify.authorize_spotify()
@@ -396,9 +401,16 @@ class SpotifyDownloader:
 
 
 class Program:
-    dl: SpotifyDownloader
-    engine: Engine
+    """
+    The `Program` class is what pulls everything together to provide the main functionality of the program.
 
+    This is what marries the API and database layers of the program together.
+    """
+
+    dl: SpotifyDownloader  # A SpotifyDownloader for fetching the user's library
+    engine: Engine  # An SQLAlchemy engine for saving to the database
+
+    # These are dictionaries that map IDs to JSON responses
     tracks: dict[str, TrackResponse]
     albums: dict[str, AlbumResponse]
     artists: dict[str, ArtistResponse]
@@ -432,6 +444,14 @@ class Program:
         self.audio_features = dict()
 
     async def fetch_library(self):
+        """
+        `fetch_library` will  fetch the saved resources from the Spotify API
+        and then stores the responses in the dictionaries.
+
+        It then calls `fetch_required` after this in order to have the complete
+        metadata of the Spotify library.
+        """
+
         async with self.dl:
             # Fetch the user's library
             saved_tracks = await self.dl.fetch_saved_tracks()
@@ -477,12 +497,16 @@ class Program:
             fetched_artists = await self.dl.fetch_multiple_artists(required_artists)
             self.artists |= {a.id: a for a in fetched_artists}
 
-            # TODO: Fetching the audio features can be done in parallel
             self.audio_features = await self.dl.fetch_multiple_audio_features(
                 self.tracks.keys()
             )
 
     def save_to_db(self):
+        """
+        `save_to_db` converts the contents of the dictionaries into database
+        objects and then saves them into the database.
+        """
+
         session = Session(self.engine)
 
         for artist in tqdm(
@@ -527,8 +551,8 @@ class Program:
                 map(lambda a: self.artists[a].to_db_object(), track.required_artists())
             )
 
-            # TODO: If?
-            track_db.audio_features = self.audio_features[track.id]
+            if self.audio_features.get(track.id) is not None:
+                track_db.audio_features = self.audio_features[track.id]
 
             with session.no_autoflush:
                 session.add(track_db)
@@ -555,6 +579,7 @@ async def main():
 
 
 if __name__ == "__main__":
+    # This is to fix a warning that hasn't been fixed by the httpx library yet
     # https://github.com/encode/httpx/issues/914
     if (
         sys.version_info[0] == 3
@@ -569,6 +594,7 @@ if __name__ == "__main__":
         LOGGING_ENABLED = os.getenv("LOGGING_ENABLED")
 
         if LOGGING_ENABLED is not None:
+            # Enable the logger
             # https://docs.python.org/3/howto/logging.html
             logging.basicConfig(
                 filename="spotifysqlite.log",

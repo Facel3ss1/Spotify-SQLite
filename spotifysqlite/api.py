@@ -50,7 +50,6 @@ class SpotifySession(AsyncOAuth2Client):
             show_dialog="true" if show_dialog else "false",
         )
 
-        # TODO: We could save the previous token
         print(f"Opening {authorization_url} in web browser...")
 
         if open_browser:
@@ -77,8 +76,6 @@ class SpotifySession(AsyncOAuth2Client):
         r.raise_for_status()
 
         return r
-
-    # TODO: Handle errors from the Spotify API
 
     async def get_multiple_albums(
         self, tx_album: MemoryObjectSendStream, *, ids: list[str]

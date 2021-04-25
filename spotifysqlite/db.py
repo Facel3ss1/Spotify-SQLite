@@ -529,7 +529,7 @@ class AudioFeatures(Base):
 # This means you can access columns from their parent tables and SQLAlchemy
 # does the rest with joins under the hood.
 
-# TODO: Generalise from_unsaved methods into SpotifyResource?
+
 class FollowedArtist(Artist):
     @classmethod
     def from_artist(cls, artist: Artist):
