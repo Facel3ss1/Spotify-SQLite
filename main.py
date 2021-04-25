@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 from functools import cache, partial
 from math import ceil
 from typing import Callable, Coroutine, Union
@@ -445,13 +446,6 @@ class Program:
 
         await self.fetch_required()
 
-        print("Setting up Database...")
-
-        # Delete anything that was there before
-        db.reset_database(self.engine)
-
-        self.save_to_db()
-
     async def fetch_required(self):
         """
         `fetch_required` will authorise the user with Spotify and then fetch every track from their
@@ -491,15 +485,32 @@ class Program:
     def save_to_db(self):
         session = Session(self.engine)
 
+        for artist in tqdm(
+            self.artists.values(),
+            ascii=True,
+            desc="Adding Artists to Database",
+            unit="artist",
+        ):
+            artist_db = artist.to_db_object()
+
+            if artist_db.is_saved:
+                session.add(artist_db)
+
         # Add artists to the albums
-        for album in self.albums.values():
+        for album in tqdm(
+            self.albums.values(),
+            ascii=True,
+            desc="Adding Albums to Database",
+            unit="album",
+        ):
             album_db = album.to_db_object()
 
             album_db.artists = list(
                 map(lambda a: self.artists[a].to_db_object(), album.required_artists())
             )
 
-        # TODO: I forgot to save the saved albums and followed artists whoops
+            if album_db.is_saved:
+                session.add(album_db)
 
         # Add albums, artists, and audio features to the tracks, and add the tracks to the session
         for track in tqdm(
@@ -527,18 +538,24 @@ class Program:
 
 
 async def main():
-    # TODO: Make this the Spotify username
-    filename = "test.db"
+    if len(sys.argv) == 1:
+        filename = "spotifysqlite.db"
+    else:
+        filename = sys.argv[1]
 
     program = Program(filename)
-
     await program.fetch_library()
+
+    print("Setting up Database...")
+
+    # Delete anything that was there before
+    db.reset_database(program.engine)
+
+    program.save_to_db()
 
 
 if __name__ == "__main__":
     # https://github.com/encode/httpx/issues/914
-    import sys
-
     if (
         sys.version_info[0] == 3
         and sys.version_info[1] >= 8
@@ -546,18 +563,22 @@ if __name__ == "__main__":
     ):
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-    # https://docs.python.org/3/howto/logging.html
-    # logging.basicConfig(
-    #     filename="debug.log",
-    #     level=logging.DEBUG,
-    #     format="%(levelname)s [%(asctime)s] %(name)s - %(message)s",
-    #     datefmt="%Y-%m-%d %H:%M:%S",
-    # )
-
-    # logging.getLogger("sqlalchemy.engine").setLevel(logging.INFO)
-
     try:
         load_dotenv()
+
+        LOGGING_ENABLED = os.getenv("LOGGING_ENABLED")
+
+        if LOGGING_ENABLED is not None:
+            # https://docs.python.org/3/howto/logging.html
+            logging.basicConfig(
+                filename="spotifysqlite.log",
+                level=logging.DEBUG,
+                format="%(levelname)s [%(asctime)s] %(name)s - %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+
+            logging.getLogger("sqlalchemy.engine").setLevel(logging.INFO)
+
         asyncio.run(main())
         logger.info("Finished!")
         print("Finished!")

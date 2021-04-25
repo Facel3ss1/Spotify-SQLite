@@ -266,7 +266,7 @@ class HasGenres:
 
     # https://docs.sqlalchemy.org/en/13/orm/extensions/associationproxy.html#simplifying-scalar-collections
     @declared_attr
-    def genres(cls):
+    def genres(_):
         return association_proxy("_genres", "name")
 
     @validates("_genres")
@@ -540,6 +540,8 @@ class FollowedArtist(Artist):
             followers=artist.followers,
         )
 
+        followed_artist.genres = artist.genres
+
         return followed_artist
 
     @classmethod
@@ -566,6 +568,8 @@ class SavedAlbum(Album):
             label=album.label,
             added_at=added_at,
         )
+
+        saved_album.genres = album.genres
 
         return saved_album
 

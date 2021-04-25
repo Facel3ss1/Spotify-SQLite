@@ -44,7 +44,7 @@ class SpotifySession(AsyncOAuth2Client):
         # https://docs.authlib.org/en/stable/client/oauth2.html
 
         # We have to use super() because we override .get() below
-        authorization_url, state = super().create_authorization_url(
+        authorization_url, _ = super().create_authorization_url(
             self.AUTHORIZATION_BASE_URL,
             # Spotify specific parameter that always shows the web UI for authorizing regardless of prior authorization.
             show_dialog="true" if show_dialog else "false",
@@ -58,7 +58,7 @@ class SpotifySession(AsyncOAuth2Client):
 
         authorization_response = input("Enter the full callback URL: ")
 
-        token = await super().fetch_token(
+        await super().fetch_token(
             self.TOKEN_URL, authorization_response=authorization_response
         )
 
